@@ -10,12 +10,13 @@ import (
 
 // mockDriver implements the driver.Driver interface for the account flow.
 type mockDriver struct {
-	gotNonce *big.Int
-	gotChain int
-	called   bool
+	gotNonce  *big.Int
+	gotChain  int
+	called    bool
+	receivers [][]byte
 }
 
-func (m *mockDriver) GenerateProfile(seed []byte, index uint64) ([]byte, error) {
+func (m *mockDriver) GenerateProfile(seed []byte, index profile.ProfileIndex) ([]byte, error) {
 	buf := make([]byte, profile.ProfileLen)
 	// Place the seed at the start and fill the remainder deterministically.
 	copy(buf, seed)
@@ -25,11 +26,11 @@ func (m *mockDriver) GenerateProfile(seed []byte, index uint64) ([]byte, error) 
 	return buf, nil
 }
 
-func (m *mockDriver) Balance(seed []byte, index uint64, notes []driver.Note) (*big.Int, *big.Int, error) {
+func (m *mockDriver) Balance(seed []byte, index profile.ProfileIndex, notes []driver.Note) (*big.Int, *big.Int, error) {
 	return big.NewInt(0), big.NewInt(0), nil
 }
 
-func (m *mockDriver) PickNotes(seed []byte, index uint64, notes []driver.Note, value *big.Int) ([]driver.Note, error) {
+func (m *mockDriver) PickNotes(seed []byte, index profile.ProfileIndex, notes []driver.Note, value *big.Int) ([]driver.Note, error) {
 	return nil, nil
 }
 
@@ -37,6 +38,7 @@ func (m *mockDriver) Moonlight(in driver.MoonlightInput) ([]byte, string, error)
 	m.called = true
 	m.gotNonce = in.Nonce
 	m.gotChain = in.ChainID
+	m.receivers = append(m.receivers, append([]byte(nil), in.Receiver...))
 	return []byte{0xde, 0xad}, "0x" + in.Nonce.String(), nil
 }
 
@@ -100,6 +102,73 @@ func TestAccountTransferBuild(t *testing.T) {
 	if res.ChainID != 0x2a {
 		t.Errorf("result chain = %d, want 42", res.ChainID)
 	}
+}
+
+// TestRoutedTransferIndependence checks that routing one base transfer to two
+// different accounts keeps each build on its own receiver despite shared state.
+func TestRoutedTransferIndependence(t *testing.T) {
+	md := &mockDriver{}
+	entry := NewBookEntry(mustProfile(t), mockTreasury{}, md)
+
+	base := NewTransfer(entry).Amount(big.NewInt(5)).Chain(0x2a)
+
+	first, err := base.To(receiverAccountKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := base.To(secondReceiverAccountKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := first.Account.Build(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Account.Build(); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(md.receivers) != 2 {
+		t.Fatalf("expected 2 builds, got %d", len(md.receivers))
+	}
+	firstKey := decodeAccountKey(t, receiverAccountKey(t))
+	secondKey := decodeAccountKey(t, secondReceiverAccountKey(t))
+	if !bytesEqual(md.receivers[0], firstKey) {
+		t.Fatal("first route signed to the wrong receiver")
+	}
+	if !bytesEqual(md.receivers[1], secondKey) {
+		t.Fatal("second route signed to the wrong receiver")
+	}
+}
+
+func secondReceiverAccountKey(t *testing.T) string {
+	t.Helper()
+	buf := make([]byte, profile.AccountKeyLen)
+	for i := range buf {
+		buf[i] = byte(0x40 | (i % 32))
+	}
+	return profile.EncodeAccount(buf)
+}
+
+func decodeAccountKey(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := profile.DecodeKey(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestAccountTransferRequiresDriver(t *testing.T) {

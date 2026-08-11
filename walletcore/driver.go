@@ -9,8 +9,9 @@ import (
 )
 
 // GenerateProfile derives a 160-byte profile buffer (address || account) from
-// a seed and index. It returns an owned copy.
-func (w *WalletCore) GenerateProfile(seed []byte, index uint64) ([]byte, error) {
+// a seed and index. It returns an owned copy. Only profile indexes within
+// wallet-core's u8 index space are accepted.
+func (w *WalletCore) GenerateProfile(seed []byte, index profile.ProfileIndex) ([]byte, error) {
 	var buf []byte
 	err := w.runLocked(opsCtx(), func(w *WalletCore) error {
 		if err := validateSeed(seed); err != nil {
@@ -35,7 +36,7 @@ func (w *WalletCore) GenerateProfile(seed []byte, index uint64) ([]byte, error) 
 		}
 
 		if err := w.invoke(opsCtx(), "generate_profile", fn,
-			uint64(seedPtr), index, uint64(out),
+			uint64(seedPtr), uint64(index), uint64(out),
 		); err != nil {
 			return err
 		}
@@ -55,7 +56,7 @@ func (w *WalletCore) MinimumStake() (*big.Int, error) {
 }
 
 // Balance computes {value, spendable} for an owner from its owned notes.
-func (w *WalletCore) Balance(seed []byte, index uint64, notes []driver.Note) (*big.Int, *big.Int, error) {
+func (w *WalletCore) Balance(seed []byte, index profile.ProfileIndex, notes []driver.Note) (*big.Int, *big.Int, error) {
 	var value, spendable *big.Int
 	err := w.runLocked(opsCtx(), func(w *WalletCore) error {
 		if err := validateSeed(seed); err != nil {
@@ -86,7 +87,7 @@ func (w *WalletCore) Balance(seed []byte, index uint64, notes []driver.Note) (*b
 		}
 
 		if err := w.invoke(opsCtx(), "balance", fn,
-			uint64(seedPtr), index, uint64(notesPtr), uint64(infoPtr),
+			uint64(seedPtr), uint64(index), uint64(notesPtr), uint64(infoPtr),
 		); err != nil {
 			return err
 		}
@@ -105,7 +106,7 @@ func (w *WalletCore) Balance(seed []byte, index uint64, notes []driver.Note) (*b
 
 // PickNotes selects notes spending up to value for an owner. It returns the
 // selected notes (nullifier:value entries).
-func (w *WalletCore) PickNotes(seed []byte, ownerIndex uint64, notes []driver.Note, value *big.Int) ([]driver.Note, error) {
+func (w *WalletCore) PickNotes(seed []byte, ownerIndex profile.ProfileIndex, notes []driver.Note, value *big.Int) ([]driver.Note, error) {
 	if len(notes) == 0 {
 		return nil, nil
 	}
@@ -115,8 +116,9 @@ func (w *WalletCore) PickNotes(seed []byte, ownerIndex uint64, notes []driver.No
 		if err := validateSeed(seed); err != nil {
 			return err
 		}
-		if value == nil || value.Sign() < 0 {
-			return fmt.Errorf("walletcore: value must be non-negative")
+		value64, err := u64OrErr("pick value", value)
+		if err != nil {
+			return err
 		}
 
 		seedPtr, err := w.box(opsCtx(), seed)
@@ -134,7 +136,7 @@ func (w *WalletCore) PickNotes(seed []byte, ownerIndex uint64, notes []driver.No
 		// do NOT defer free here; read result below within the locked region.
 
 		valueBytes := make([]byte, 8)
-		putLeUint64(valueBytes, value.Uint64())
+		putLeUint64(valueBytes, value64)
 		valuePtr, err := w.box(opsCtx(), valueBytes)
 		if err != nil {
 			return err
@@ -148,7 +150,7 @@ func (w *WalletCore) PickNotes(seed []byte, ownerIndex uint64, notes []driver.No
 		}
 
 		if err := w.invoke(opsCtx(), "pick_notes", fn,
-			uint64(seedPtr), ownerIndex, uint64(valuePtr), uint64(notesPtr),
+			uint64(seedPtr), uint64(ownerIndex), uint64(valuePtr), uint64(notesPtr),
 		); err != nil {
 			w.free(opsCtx(), notesPtr)
 			return err

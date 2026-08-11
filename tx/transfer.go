@@ -20,15 +20,16 @@ func NewTransfer(e *BookEntry) *Transfer {
 	return &Transfer{Builder: newBuilder(e)}
 }
 
-// Amount sets the transfer amount in Lux.
+// Amount sets the transfer amount in Lux. The value is copied so later caller
+// mutation cannot alter a pending transaction.
 func (t *Transfer) Amount(v *big.Int) *Transfer {
-	t.attrs.amount = v
+	t.attrs.amount = new(big.Int).Set(v)
 	return t
 }
 
-// Deposit sets an optional deposit amount in Lux.
+// Deposit sets an optional deposit amount in Lux. The value is copied.
 func (t *Transfer) Deposit(v *big.Int) *Transfer {
-	t.attrs.deposit = v
+	t.attrs.deposit = new(big.Int).Set(v)
 	return t
 }
 
@@ -44,9 +45,9 @@ func (t *Transfer) Chain(v int) *Transfer {
 	return t
 }
 
-// Nonce pins the account nonce explicitly.
+// Nonce pins the account nonce explicitly. The value is copied.
 func (t *Transfer) Nonce(v *big.Int) *Transfer {
-	t.attrs.nonce = v
+	t.attrs.nonce = new(big.Int).Set(v)
 	return t
 }
 
@@ -58,6 +59,10 @@ type Routed struct {
 
 // To selects the destination. A 96-byte account key yields an account transfer;
 // a 64-byte address key yields an address transfer.
+//
+// Each routed builder gets an independent snapshot of the transfer attributes,
+// so routing the same base transfer to two receivers cannot change the first
+// route's recipient.
 func (t *Transfer) To(identifier string) (*Routed, error) {
 	bytes, err := t.decodeReceiver(identifier)
 	if err != nil {
@@ -65,12 +70,14 @@ func (t *Transfer) To(identifier string) (*Routed, error) {
 	}
 	switch len(bytes) {
 	case profile.AccountKeyLen:
-		a := &AccountTransfer{Transfer: t}
-		a.attrs.receiver = bytes
+		b := newBuilderSnapshot(t.entry, t.chain, t.attrs.clone())
+		b.attrs.receiver = bytes
+		a := &AccountTransfer{Transfer: &Transfer{Builder: b}}
 		return &Routed{Account: a}, nil
 	case profile.AddressKeyLen:
-		a := &AddressTransfer{Transfer: t}
-		a.attrs.receiver = bytes
+		b := newBuilderSnapshot(t.entry, t.chain, t.attrs.clone())
+		b.attrs.receiver = bytes
+		a := &AddressTransfer{Transfer: &Transfer{Builder: b}}
 		return &Routed{Address: a}, nil
 	default:
 		return nil, fmt.Errorf("tx: invalid identifier")

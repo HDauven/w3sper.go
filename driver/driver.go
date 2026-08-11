@@ -6,7 +6,11 @@
 // can be exercised end-to-end.
 package driver
 
-import "math/big"
+import (
+	"math/big"
+
+	"github.com/dusk-network/w3sper-go/profile"
+)
 
 // Note is a raw phoneix note entry (nullifier key : note value) as returned by
 // the treasury, keyed by nullifier.
@@ -20,7 +24,7 @@ type Note struct {
 // MoonlightInput describes an account (moonlight) transaction.
 type MoonlightInput struct {
 	Seed          []byte
-	SenderIndex   uint64
+	SenderIndex   profile.ProfileIndex
 	Receiver      []byte // nil for contract deployment
 	TransferValue *big.Int
 	Deposit       *big.Int
@@ -34,7 +38,7 @@ type MoonlightInput struct {
 // PhoenixInput describes a phoenix (shielded) transaction that must be proven.
 type PhoenixInput struct {
 	Seed        []byte
-	SenderIndex uint64
+	SenderIndex profile.ProfileIndex
 	Receiver    []byte
 	Inputs      []Note
 	Openings    [][]byte
@@ -50,13 +54,13 @@ type PhoenixInput struct {
 type Driver interface {
 	// GenerateProfile derives a 160-byte profile buffer (address || account)
 	// from seed and index n.
-	GenerateProfile(seed []byte, index uint64) ([]byte, error)
+	GenerateProfile(seed []byte, index profile.ProfileIndex) ([]byte, error)
 
 	// Balance computes {value, spendable} for an address from its notes.
-	Balance(seed []byte, index uint64, notes []Note) (*big.Int, *big.Int, error)
+	Balance(seed []byte, index profile.ProfileIndex, notes []Note) (*big.Int, *big.Int, error)
 
 	// PickNotes selects notes spending up to value for an owner.
-	PickNotes(seed []byte, ownerIndex uint64, notes []Note, value *big.Int) ([]Note, error)
+	PickNotes(seed []byte, ownerIndex profile.ProfileIndex, notes []Note, value *big.Int) ([]Note, error)
 
 	// Moonlight builds and signs an account transaction, returning the serialized
 	// transaction bytes and its hash.

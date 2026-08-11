@@ -16,23 +16,36 @@ const (
 	AccountKeyLen = 96
 	// ProfileLen is the combined length of an address and account key.
 	ProfileLen = AddressKeyLen + AccountKeyLen
+	// MaxProfileIndex is the largest profile index wallet-core supports. Its
+	// FFI takes the index as a u8.
+	MaxProfileIndex = int64(255)
 )
+
+// ProfileIndex is a profile derivation index as wallet-core's FFI accepts it
+// (u8).
+type ProfileIndex uint8
 
 // Driver performs the cryptographic derivation of a profile from a seed and
 // index. It mirrors the wallet-core WASM `generate_profile` export.
 type Driver interface {
-	GenerateProfile(seed []byte, index uint64) ([]byte, error)
+	GenerateProfile(seed []byte, index ProfileIndex) ([]byte, error)
 }
 
 // Generator is a deterministic profile factory backed by a seed provider. It
 // caches profiles by their derivation index, so calling Next() before Default()
 // does not misplace the index-0 profile.
+// sourceToken is a non-zero-size identity token marking a generator (and the
+// profiles it derives) as belonging to one seed source. Zero-size struct
+// pointers may compare equal for distinct allocations in Go, so a non-zero-size
+// token guarantees per-generator pointer identity.
+type sourceToken struct{ _ int }
+
 type Generator struct {
 	seeder    func() ([]byte, error)
 	generator Driver
 	profiles  map[int64]*Profile
 	nextIndex int64 // monotonic; starts at 1, index 0 is reserved for Default
-	source    any
+	source    *sourceToken
 }
 
 // NewGenerator returns a profile generator that derives profiles from seeds
@@ -43,12 +56,12 @@ func NewGenerator(seeder func() ([]byte, error), driver Driver) *Generator {
 		generator: driver,
 		profiles:  make(map[int64]*Profile),
 		nextIndex: 1,
-		source:    seeder,
+		source:    &sourceToken{},
 	}
 }
 
-// sameSourceOf reports whether p was derived from the same source (seeder) as
-// this generator.
+// sameSourceOf reports whether p was derived by this generator (same seed
+// source). Profile source identity is tested with a comparable pointer.
 func (g *Generator) sameSourceOf(p *Profile) bool {
 	return p != nil && p.source == g.source
 }
@@ -77,7 +90,7 @@ type Profile struct {
 	account *Key
 	index   int64 // -1 until generated through a Generator
 	seed    []byte
-	source  any
+	source  *sourceToken
 }
 
 // newProfile builds a Profile from a 160-byte buffer.
@@ -128,6 +141,9 @@ func (p *Profile) Seed() []byte {
 // Next derives and returns the next profile, advancing a monotonic index that
 // skips the default (index 0) profile until it has been generated.
 func (g *Generator) Next() (*Profile, error) {
+	if g.nextIndex > MaxProfileIndex {
+		return nil, fmt.Errorf("profile: cannot derive beyond index %d (wallet-core u8 index space)", MaxProfileIndex)
+	}
 	p, err := g.nth(g.nextIndex)
 	if err != nil {
 		return nil, err
@@ -160,6 +176,9 @@ func (g *Generator) Len() int { return len(g.profiles) }
 
 // nth derives and caches the profile at index n (idempotent).
 func (g *Generator) nth(n int64) (*Profile, error) {
+	if !validIndex(n) {
+		return nil, fmt.Errorf("profile: index %d out of range [0, %d]", n, MaxProfileIndex)
+	}
 	if cached := g.profiles[n]; cached != nil {
 		return cached, nil
 	}
@@ -172,7 +191,7 @@ func (g *Generator) nth(n int64) (*Profile, error) {
 	if err != nil {
 		return nil, err
 	}
-	buf, err := g.generator.GenerateProfile(seed, uint64(n))
+	buf, err := g.generator.GenerateProfile(seed, ProfileIndex(n))
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +204,11 @@ func (g *Generator) nth(n int64) (*Profile, error) {
 	p.source = g.source
 	g.profiles[n] = p
 	return p, nil
+}
+
+// validIndex reports whether n is within wallet-core's u8 index space.
+func validIndex(n int64) bool {
+	return n >= 0 && n <= MaxProfileIndex
 }
 
 // Parse builds a Profile from a 160-byte buffer (address || account).

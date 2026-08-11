@@ -26,15 +26,15 @@ func (fakeTreasury) StakeInfo(account []byte) (tx.StakeInfo, error) {
 
 type fakeDriver struct{}
 
-func (fakeDriver) GenerateProfile(seed []byte, index uint64) ([]byte, error) {
+func (fakeDriver) GenerateProfile(seed []byte, index profile.ProfileIndex) ([]byte, error) {
 	return make([]byte, profile.ProfileLen), nil
 }
 
-func (fakeDriver) Balance(seed []byte, index uint64, notes []driver.Note) (*big.Int, *big.Int, error) {
+func (fakeDriver) Balance(seed []byte, index profile.ProfileIndex, notes []driver.Note) (*big.Int, *big.Int, error) {
 	return big.NewInt(10), big.NewInt(4), nil
 }
 
-func (fakeDriver) PickNotes(seed []byte, index uint64, notes []driver.Note, value *big.Int) ([]driver.Note, error) {
+func (fakeDriver) PickNotes(seed []byte, index profile.ProfileIndex, notes []driver.Note, value *big.Int) ([]driver.Note, error) {
 	return nil, nil
 }
 
@@ -68,14 +68,14 @@ func TestBookkeeperAccountBalance(t *testing.T) {
 	}
 }
 
-func TestBookkeeperAddressBalanceRequiresDriver(t *testing.T) {
-	b := New(fakeTreasury{}, nil)
+func TestBookkeeperAddressBalanceUnavailable(t *testing.T) {
+	b := New(fakeTreasury{}, &fakeDriver{})
 	_, err := b.Balance(addressKey(t))
 	if err == nil {
-		t.Fatal("expected error with nil driver")
+		t.Fatal("expected error for Phoenix address balance")
 	}
-	if !errors.Is(err, driver.ErrDriverRequired) {
-		t.Fatalf("expected driver-required, got %v", err)
+	if !errors.Is(err, ErrPhoenixUnavailable) {
+		t.Fatalf("expected ErrPhoenixUnavailable, got %v", err)
 	}
 }
 

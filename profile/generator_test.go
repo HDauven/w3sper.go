@@ -8,7 +8,7 @@ import (
 // fakeDriver derives a profile by filling the buffer with the index byte.
 type fakeDriver struct{ count int }
 
-func (f *fakeDriver) GenerateProfile(seed []byte, index uint64) ([]byte, error) {
+func (f *fakeDriver) GenerateProfile(seed []byte, index ProfileIndex) ([]byte, error) {
 	f.count++
 	buf := make([]byte, ProfileLen)
 	for i := range buf {
@@ -53,6 +53,71 @@ func TestGeneratorSeederError(t *testing.T) {
 	g := NewGenerator(func() ([]byte, error) { return nil, wantErr }, &fakeDriver{})
 	if _, err := g.Default(); !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
+	}
+}
+
+// TestGeneratorIndexOf ensures IndexOf works for a generator's own profiles and
+// returns -1 for an unknown source, without panicking (regression for comparing
+// non-comparable function sources).
+func TestGeneratorIndexOf(t *testing.T) {
+	seed := []byte("seed-material-0000000000000000000000")
+	g := NewGenerator(func() ([]byte, error) { return seed, nil }, &fakeDriver{})
+
+	p, err := g.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := g.IndexOf(p); got != 0 {
+		t.Errorf("IndexOf(default) = %d, want 0", got)
+	}
+
+	next, err := g.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := g.IndexOf(next); got != 1 {
+		t.Errorf("IndexOf(next) = %d, want 1", got)
+	}
+
+	// A profile derived by a different generator (different seed source) must
+	// not be attributed to this generator.
+	otherSeed := []byte("other-seed-00000000000000000000000000")
+	otherGen := NewGenerator(func() ([]byte, error) { return otherSeed, nil }, &fakeDriver{})
+	foreign, err := otherGen.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := g.IndexOf(foreign); got != -1 {
+		t.Errorf("IndexOf(foreign) = %d, want -1", got)
+	}
+	if got := otherGen.IndexOf(p); got != -1 {
+		t.Errorf("foreign.IndexOf(our) = %d, want -1", got)
+	}
+}
+
+// TestGeneratorIndexExhaustion verifies that the wallet-core u8 index space is
+// honored: index 255 is the last valid, and index 256 is rejected.
+func TestGeneratorIndexExhaustion(t *testing.T) {
+	seed := []byte("seed-material-0000000000000000000000")
+	g := NewGenerator(func() ([]byte, error) { return seed, nil }, &fakeDriver{})
+
+	var last *Profile
+	var err error
+	for i := int64(1); i <= MaxProfileIndex; i++ {
+		last, err = g.Next()
+		if err != nil {
+			t.Fatalf("Next(%d): %v", i, err)
+		}
+	}
+	if last.Index() != MaxProfileIndex {
+		t.Fatalf("last index = %d, want %d", last.Index(), MaxProfileIndex)
+	}
+
+	if _, err := g.Next(); err == nil {
+		t.Fatal("expected error deriving beyond MaxProfileIndex")
+	}
+	if _, err := g.nth(MaxProfileIndex + 1); err == nil {
+		t.Fatal("expected error for nth() beyond MaxProfileIndex")
 	}
 }
 

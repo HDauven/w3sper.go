@@ -75,6 +75,10 @@ func Load(ctx context.Context) (*WalletCore, error) {
 		_ = rt.Close(ctx)
 		return nil, err
 	}
+	if glob.KeySize != 32 {
+		_ = rt.Close(ctx)
+		return nil, fmt.Errorf("walletcore: unexpected KEY_SIZE %d, want 32", glob.KeySize)
+	}
 
 	return &WalletCore{mod: mod, rt: rt, glob: glob, alive: true}, nil
 }

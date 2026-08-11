@@ -97,7 +97,7 @@ func (w *WalletCore) Moonlight(in driver.MoonlightInput) (tx []byte, hash string
 
 		if err := w.invoke(opsCtx(), "moonlight", fn,
 			uint64(seedPtr),
-			in.SenderIndex,
+			uint64(in.SenderIndex),
 			uint64(receiverPtr),
 			uint64(uv),
 			uint64(dep),
@@ -220,6 +220,12 @@ func (w *WalletCore) Phoenix(in driver.PhoenixInput) (txOut []byte, proofOut []b
 		if _, err := validateChainID(in.ChainID); err != nil {
 			return err
 		}
+		if len(in.Root) != 32 {
+			return fmt.Errorf("walletcore: phoenix root must be 32 bytes, got %d", len(in.Root))
+		}
+		if len(in.Inputs) != len(in.Openings) {
+			return fmt.Errorf("walletcore: phoenix inputs (%d) and openings (%d) count mismatch", len(in.Inputs), len(in.Openings))
+		}
 
 		rng := make([]byte, 32)
 		if _, err := randRead(rng); err != nil {
@@ -315,7 +321,7 @@ func (w *WalletCore) Phoenix(in driver.PhoenixInput) (txOut []byte, proofOut []b
 		if err := w.invoke(opsCtx(), "phoenix", fn,
 			uint64(rngPtr),
 			uint64(seedPtr),
-			in.SenderIndex,
+			uint64(in.SenderIndex),
 			uint64(receiverPtr),
 			uint64(inputsPtr),
 			uint64(openingsPtr),

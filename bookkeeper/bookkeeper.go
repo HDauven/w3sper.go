@@ -16,6 +16,10 @@ import (
 // Treasury is the same interface consumed by the tx builders.
 type Treasury = tx.Treasury
 
+// ErrPhoenixUnavailable is returned for shielded (Phoenix) operations that are
+// not supported by this Moonlight-only build.
+var ErrPhoenixUnavailable = fmt.Errorf("bookkeeper: phoenix balance is unavailable in this Moonlight-only build")
+
 // Bookkeeper is a profile-bound wallet facade over a treasury.
 type Bookkeeper struct {
 	treasury Treasury
@@ -45,11 +49,10 @@ func (b *Bookkeeper) Balance(identifier string) (balance, error) {
 		}
 		return balance{Account: &ab}, nil
 	case "address":
-		addr, err := b.addressBalance(key)
-		if err != nil {
-			return balance{}, err
-		}
-		return balance{Address: addr}, nil
+		// A Phoenix address balance requires the owner's seed and derivation
+		// index; an address string alone is insufficient. Shielded support is out
+		// of scope for this Moonlight-only build.
+		return balance{}, ErrPhoenixUnavailable
 	default:
 		return balance{}, fmt.Errorf("bookkeeper: invalid identifier")
 	}
@@ -93,19 +96,10 @@ func (b *Bookkeeper) accountBalance(key []byte) (tx.AccountBalance, error) {
 	return b.treasury.AccountBalance(key)
 }
 
+// addressBalance is not supported without an owner seed/index; see
+// ErrPhoenixUnavailable.
 func (b *Bookkeeper) addressBalance(key []byte) (*AddressBalance, error) {
-	if b.driver == nil {
-		return nil, driver.ErrDriverRequired
-	}
-	notes, err := b.treasury.AddressNotes(key)
-	if err != nil {
-		return nil, err
-	}
-	value, spendable, err := b.driver.Balance(nil, 0, notes)
-	if err != nil {
-		return nil, err
-	}
-	return &AddressBalance{Value: value, Spendable: spendable}, nil
+	return nil, ErrPhoenixUnavailable
 }
 
 func decodeKey(identifier string) ([]byte, error) {

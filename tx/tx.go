@@ -123,8 +123,40 @@ type attributes struct {
 	receiver []byte
 }
 
+// clone returns a deep copy of the attributes. Go's big.Int values are
+// mutable, unlike JavaScript BigInt, so amounts/deposits/nonces are always
+// copied to prevent caller mutation and cross-builder aliasing.
+func (a *attributes) clone() attributes {
+	c := attributes{
+		gas:      a.gas, // gas.Config is treated as immutable for a snapshot
+		payload:  a.payload,
+		receiver: append([]byte(nil), a.receiver...),
+	}
+	if a.amount != nil {
+		c.amount = new(big.Int).Set(a.amount)
+	}
+	if a.deposit != nil {
+		c.deposit = new(big.Int).Set(a.deposit)
+	}
+	if a.nonce != nil {
+		c.nonce = new(big.Int).Set(a.nonce)
+	}
+	if a.chain != nil {
+		v := *a.chain
+		c.chain = &v
+	}
+	return c
+}
+
 func newBuilder(e *BookEntry) *Builder {
 	return &Builder{entry: e}
+}
+
+// newBuilderSnapshot returns a Builder sharing the entry and chain source but
+// with an independent snapshot of the attributes. It is used when routing a
+// transfer so that two routes cannot mutate each other's state.
+func newBuilderSnapshot(e *BookEntry, chain ChainSource, attrs attributes) *Builder {
+	return &Builder{entry: e, chain: chain, attrs: attrs}
 }
 
 func (b *Builder) Entry() *BookEntry { return b.entry }
@@ -171,9 +203,9 @@ func (b *Builder) decodeReceiver(s string) ([]byte, error) {
 	return bytes, nil
 }
 
-func (b *Builder) profileIndex() uint64 {
-	if i := b.entry.profile.Index(); i >= 0 {
-		return uint64(i)
+func (b *Builder) profileIndex() profile.ProfileIndex {
+	if i := b.entry.profile.Index(); i >= 0 && i <= profile.MaxProfileIndex {
+		return profile.ProfileIndex(i)
 	}
 	return 0
 }
