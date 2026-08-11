@@ -178,19 +178,17 @@ func (b *Builder) profileIndex() uint64 {
 	return 0
 }
 
-// profileSeed returns the 64-byte seed used for key derivation. It prefers the
-// seed the profile was derived from, falling back to the account key bytes for
-// transparent default behaviour.
-func (b *Builder) profileSeed() []byte {
-	if b.entry != nil && b.entry.profile != nil {
-		if s := b.entry.profile.Seed(); len(s) > 0 {
-			return s
-		}
+// profileSeed returns the 64-byte seed used for key derivation. It requires a
+// real seed derived by a Generator; a profile parsed from public keys alone
+// cannot sign and must not silently use its public account key as seed material.
+func (b *Builder) profileSeed() ([]byte, error) {
+	if b.entry == nil || b.entry.profile == nil {
+		return nil, fmt.Errorf("tx: profile is required to sign")
 	}
-	if b.entry != nil && b.entry.profile != nil {
-		return b.entry.profile.Account().Bytes()
+	if s := b.entry.profile.Seed(); len(s) > 0 {
+		return s, nil
 	}
-	return nil
+	return nil, fmt.Errorf("tx: profile has no seed and cannot sign; derive it from a Generator")
 }
 
 // IsDriverRequired reports whether err is a missing-driver error.

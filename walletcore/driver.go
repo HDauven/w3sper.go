@@ -1,7 +1,6 @@
 package walletcore
 
 import (
-	"context"
 	"fmt"
 	"math/big"
 
@@ -10,31 +9,44 @@ import (
 )
 
 // GenerateProfile derives a 160-byte profile buffer (address || account) from
-// a seed and index, mirroring the JS `generate_profile` wrapper.
+// a seed and index. It returns an owned copy.
 func (w *WalletCore) GenerateProfile(seed []byte, index uint64) ([]byte, error) {
-	ctx := context.Background()
+	var buf []byte
+	err := w.runLocked(opsCtx(), func(w *WalletCore) error {
+		if err := validateSeed(seed); err != nil {
+			return err
+		}
 
-	seedPtr, err := w.box(ctx, seed[:])
-	if err != nil {
-		return nil, err
-	}
-	defer w.free(ctx, seedPtr)
+		seedPtr, err := w.box(opsCtx(), seed)
+		if err != nil {
+			return err
+		}
+		defer w.free(opsCtx(), seedPtr)
 
-	out, err := w.alloc(ctx, profile.ProfileLen)
-	if err != nil {
-		return nil, err
-	}
-	defer w.free(ctx, out)
+		out, err := w.alloc(opsCtx(), profile.ProfileLen)
+		if err != nil {
+			return err
+		}
+		defer w.free(opsCtx(), out)
 
-	fn := w.mod.ExportedFunction("generate_profile")
-	if fn == nil {
-		return nil, fmt.Errorf("walletcore: generate_profile not exported")
-	}
-	if _, err := fn.Call(ctx, uint64(seedPtr), index, uint64(out)); err != nil {
-		return nil, fmt.Errorf("walletcore: generate_profile: %w", err)
-	}
+		fn := w.mod.ExportedFunction("generate_profile")
+		if fn == nil {
+			return fmt.Errorf("walletcore: generate_profile not exported")
+		}
 
-	return w.readBytes(ctx, out, profile.ProfileLen)
+		if err := w.invoke(opsCtx(), "generate_profile", fn,
+			uint64(seedPtr), index, uint64(out),
+		); err != nil {
+			return err
+		}
+
+		buf, err = w.readBytes(opsCtx(), out, profile.ProfileLen)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	return buf, err
 }
 
 // MinimumStake returns the network minimum stake amount.
@@ -42,84 +54,115 @@ func (w *WalletCore) MinimumStake() (*big.Int, error) {
 	return new(big.Int).SetUint64(w.glob.MinStake), nil
 }
 
-// Balance computes {value, spendable} for an address from its owned notes.
+// Balance computes {value, spendable} for an owner from its owned notes.
 func (w *WalletCore) Balance(seed []byte, index uint64, notes []driver.Note) (*big.Int, *big.Int, error) {
-	ctx := context.Background()
+	var value, spendable *big.Int
+	err := w.runLocked(opsCtx(), func(w *WalletCore) error {
+		if err := validateSeed(seed); err != nil {
+			return err
+		}
 
-	seedPtr, err := w.box(ctx, seed[:])
-	if err != nil {
-		return nil, nil, err
-	}
-	defer w.free(ctx, seedPtr)
+		seedPtr, err := w.box(opsCtx(), seed)
+		if err != nil {
+			return err
+		}
+		defer w.free(opsCtx(), seedPtr)
 
-	notesBuf, notesPtr, err := w.packNotesValues(ctx, notes)
-	if err != nil {
-		return nil, nil, err
-	}
-	_ = notesBuf
-	defer w.free(ctx, notesPtr)
+		notesPtr, err := w.boxNotesValues(opsCtx(), notes)
+		if err != nil {
+			return err
+		}
+		defer w.free(opsCtx(), notesPtr)
 
-	infoPtr, err := w.alloc(ctx, 16)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer w.free(ctx, infoPtr)
+		infoPtr, err := w.alloc(opsCtx(), 16)
+		if err != nil {
+			return err
+		}
+		defer w.free(opsCtx(), infoPtr)
 
-	fn := w.mod.ExportedFunction("balance")
-	if fn == nil {
-		return nil, nil, fmt.Errorf("walletcore: balance not exported")
-	}
-	if _, err := fn.Call(ctx, uint64(seedPtr), index, uint64(notesPtr), uint64(infoPtr)); err != nil {
-		return nil, nil, fmt.Errorf("walletcore: balance: %w", err)
-	}
+		fn := w.mod.ExportedFunction("balance")
+		if fn == nil {
+			return fmt.Errorf("walletcore: balance not exported")
+		}
 
-	info, err := w.readBytes(ctx, infoPtr, 16)
-	if err != nil {
-		return nil, nil, err
-	}
-	value := new(big.Int).SetUint64(leUint64(info[0:8]))
-	spendable := new(big.Int).SetUint64(leUint64(info[8:16]))
+		if err := w.invoke(opsCtx(), "balance", fn,
+			uint64(seedPtr), index, uint64(notesPtr), uint64(infoPtr),
+		); err != nil {
+			return err
+		}
 
-	return value, spendable, nil
+		info, err := w.readBytes(opsCtx(), infoPtr, 16)
+		if err != nil {
+			return err
+		}
+		value = new(big.Int).SetUint64(leUint64(info[0:8]))
+		spendable = new(big.Int).SetUint64(leUint64(info[8:16]))
+		return nil
+	})
+
+	return value, spendable, err
 }
 
-// PickNotes selects notes spending up to value for an owner.
+// PickNotes selects notes spending up to value for an owner. It returns the
+// selected notes (nullifier:value entries).
 func (w *WalletCore) PickNotes(seed []byte, ownerIndex uint64, notes []driver.Note, value *big.Int) ([]driver.Note, error) {
-	ctx := context.Background()
-
 	if len(notes) == 0 {
 		return nil, nil
 	}
 
-	seedPtr, err := w.box(ctx, seed[:])
-	if err != nil {
-		return nil, err
-	}
-	defer w.free(ctx, seedPtr)
+	var picked []driver.Note
+	err := w.runLocked(opsCtx(), func(w *WalletCore) error {
+		if err := validateSeed(seed); err != nil {
+			return err
+		}
+		if value == nil || value.Sign() < 0 {
+			return fmt.Errorf("walletcore: value must be non-negative")
+		}
 
-	// pack notes as entries (key || value) with DataBuffer layout
-	notesPtr, err := w.packNoteEntries(ctx, notes, false)
-	if err != nil {
-		return nil, err
-	}
-	defer w.free(ctx, notesPtr)
+		seedPtr, err := w.box(opsCtx(), seed)
+		if err != nil {
+			return err
+		}
+		defer w.free(opsCtx(), seedPtr)
 
-	valueBytes := make([]byte, 8)
-	putLeUint64(valueBytes, value.Uint64())
-	valuePtr, err := w.box(ctx, valueBytes)
-	if err != nil {
-		return nil, err
-	}
-	defer w.free(ctx, valuePtr)
+		// The input notes (key||value entries) are written in place by
+		// pick_notes, so this buffer must not be freed until the result is read.
+		notesPtr, err := w.boxNoteEntries(opsCtx(), notes)
+		if err != nil {
+			return err
+		}
+		// do NOT defer free here; read result below within the locked region.
 
-	fn := w.mod.ExportedFunction("pick_notes")
-	if fn == nil {
-		return nil, fmt.Errorf("walletcore: pick_notes not exported")
-	}
-	if _, err := fn.Call(ctx, uint64(seedPtr), ownerIndex, uint64(valuePtr), uint64(notesPtr)); err != nil {
-		return nil, fmt.Errorf("walletcore: pick_notes: %w", err)
-	}
+		valueBytes := make([]byte, 8)
+		putLeUint64(valueBytes, value.Uint64())
+		valuePtr, err := w.box(opsCtx(), valueBytes)
+		if err != nil {
+			return err
+		}
+		defer w.free(opsCtx(), valuePtr)
 
-	// read result: at notesPtr, a u32 length, followed by packed entries
-	return w.readPickedNotes(ctx, notesPtr)
+		fn := w.mod.ExportedFunction("pick_notes")
+		if fn == nil {
+			w.free(opsCtx(), notesPtr)
+			return fmt.Errorf("walletcore: pick_notes not exported")
+		}
+
+		if err := w.invoke(opsCtx(), "pick_notes", fn,
+			uint64(seedPtr), ownerIndex, uint64(valuePtr), uint64(notesPtr),
+		); err != nil {
+			w.free(opsCtx(), notesPtr)
+			return err
+		}
+
+		result, err := w.readPickedNotes(opsCtx(), notesPtr)
+		w.free(opsCtx(), notesPtr) // release the input/output buffer
+		if err != nil {
+			return err
+		}
+
+		picked = result
+		return nil
+	})
+
+	return picked, err
 }

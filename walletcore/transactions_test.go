@@ -27,10 +27,37 @@ func testSeed() []byte {
 	return seed
 }
 
+func TestGenerateProfileReturnsOwnedCopy(t *testing.T) {
+	w := testWallet(t)
+
+	first, err := w.GenerateProfile(testSeed(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := cloneBytes(first)
+
+	// Deriving a second profile must not mutate the first one's bytes, even
+	// though the WASM allocation behind `first` is released and reused.
+	if _, err := w.GenerateProfile(testSeed(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if !bytesEqual(first, expected) {
+		t.Fatal("returned profile aliases reusable WASM memory")
+	}
+
+	// And the second profile must differ from the first (ownership is a copy).
+	second, err := w.GenerateProfile(testSeed(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytesEqual(first, second) {
+		t.Fatal("profiles at different indexes are identical (data not copied)")
+	}
+}
+
 func TestMoonlightSignsTransaction(t *testing.T) {
 	w := testWallet(t)
 
-	// Derive a profile so moonlight has a valid sender.
 	profile, err := w.GenerateProfile(testSeed(), 0)
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +76,7 @@ func TestMoonlightSignsTransaction(t *testing.T) {
 		Seed:          testSeed(),
 		SenderIndex:   0,
 		Receiver:      receiver,
-		TransferValue: big.NewInt(1000000000), // 1 Dusk
+		TransferValue: big.NewInt(1000000000),
 		Deposit:       big.NewInt(0),
 		GasLimit:      big.NewInt(2900000000),
 		GasPrice:      big.NewInt(1),
@@ -70,36 +97,74 @@ func TestMoonlightSignsTransaction(t *testing.T) {
 	t.Logf("tx bytes=%d hash=%s", len(tx), hash)
 }
 
-func TestBalanceAndPickNotes(t *testing.T) {
+// TestBalanceTolerantOfUnexpectedNote runs wallet-core's `balance` against a
+// synthetic note to confirm the FFI call path (Argument marshalling, output
+// parsing) behaves without error. A zero-filled note is not a valid encrypted
+// note, so the returned values are not meaningful; the point is that the ABI
+// call itself succeeds (balance uses calculate_unchecked).
+func TestBalanceTolerantOfUnexpectedNote(t *testing.T) {
 	w := testWallet(t)
 
 	seed := testSeed()
-	// Generate a note by deriving a profile and constructing a minimal note.
-	profile, err := w.GenerateProfile(seed, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = profile
-
-	// Build a single note of the correct item size.
-	itemSize := w.glob.ItemSize
 	note := driver.Note{
 		Nullifier: make([]byte, w.glob.KeySize),
-		Value:     make([]byte, itemSize),
+		Value:     make([]byte, w.glob.ItemSize),
 	}
-	notes := []driver.Note{note}
 
-	value, spendable, err := w.Balance(seed, 0, notes)
+	value, spendable, err := w.Balance(seed, 0, []driver.Note{note})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = value
-	_ = spendable
+	if value.Sign() < 0 || spendable.Sign() < 0 {
+		t.Fatalf("negative balance returned: %s %s", value, spendable)
+	}
 	t.Logf("balance value=%s spendable=%s", value, spendable)
+}
 
-	picked, err := w.PickNotes(seed, 0, notes, big.NewInt(1))
+// TestPickNotesValidation covers the input validation surface of `pick_notes`
+// that does not require valid encrypted note fixtures. Actual note selection
+// needs real note data (see the review / integration roadmap).
+func TestPickNotesValidation(t *testing.T) {
+	w := testWallet(t)
+	seed := testSeed()
+
+	// Empty note list returns empty without invoking the WASM.
+	picked, err := w.PickNotes(seed, 0, nil, big.NewInt(1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("picked=%d", len(picked))
+	if len(picked) != 0 {
+		t.Fatalf("expected empty pick, got %d", len(picked))
+	}
+
+	// A negative value is rejected before touching the WASM.
+	note := driver.Note{
+		Nullifier: make([]byte, w.glob.KeySize),
+		Value:     make([]byte, w.glob.ItemSize),
+	}
+	if _, err := w.PickNotes(seed, 0, []driver.Note{note}, big.NewInt(-1)); err == nil {
+		t.Fatal("expected error for negative value")
+	}
+
+	// A nil value is rejected.
+	if _, err := w.PickNotes(seed, 0, []driver.Note{note}, nil); err == nil {
+		t.Fatal("expected error for nil value")
+	}
+
+	// A short seed is rejected before reaching the WASM.
+	if _, err := w.PickNotes(make([]byte, 4), 0, []driver.Note{note}, big.NewInt(1)); err == nil {
+		t.Fatal("expected error for short seed")
+	}
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

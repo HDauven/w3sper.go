@@ -24,17 +24,33 @@ type Driver interface {
 	GenerateProfile(seed []byte, index uint64) ([]byte, error)
 }
 
-// Generator is a deterministic profile factory backed by a seed provider.
+// Generator is a deterministic profile factory backed by a seed provider. It
+// caches profiles by their derivation index, so calling Next() before Default()
+// does not misplace the index-0 profile.
 type Generator struct {
 	seeder    func() ([]byte, error)
-	profiles  []*Profile
 	generator Driver
+	profiles  map[int64]*Profile
+	nextIndex int64 // monotonic; starts at 1, index 0 is reserved for Default
+	source    any
 }
 
 // NewGenerator returns a profile generator that derives profiles from seeds
 // produced by seeder and index n, using driver for cryptographic derivation.
 func NewGenerator(seeder func() ([]byte, error), driver Driver) *Generator {
-	return &Generator{seeder: seeder, generator: driver}
+	return &Generator{
+		seeder:    seeder,
+		generator: driver,
+		profiles:  make(map[int64]*Profile),
+		nextIndex: 1,
+		source:    seeder,
+	}
+}
+
+// sameSourceOf reports whether p was derived from the same source (seeder) as
+// this generator.
+func (g *Generator) sameSourceOf(p *Profile) bool {
+	return p != nil && p.source == g.source
 }
 
 // Key is a single Dusk key (address or account) with a Base58 string form.
@@ -61,6 +77,7 @@ type Profile struct {
 	account *Key
 	index   int64 // -1 until generated through a Generator
 	seed    []byte
+	source  any
 }
 
 // newProfile builds a Profile from a 160-byte buffer.
@@ -108,43 +125,49 @@ func (p *Profile) Seed() []byte {
 	return out
 }
 
-// Next derives and returns the next profile, skipping the default profile
-// (index 0) until it has been generated.
+// Next derives and returns the next profile, advancing a monotonic index that
+// skips the default (index 0) profile until it has been generated.
 func (g *Generator) Next() (*Profile, error) {
-	index := int64(len(g.profiles))
-	if index == 0 {
-		index = 1
+	p, err := g.nth(g.nextIndex)
+	if err != nil {
+		return nil, err
 	}
-	return g.nth(index)
+	g.nextIndex++
+	return p, nil
 }
 
 // Default returns (and caches) the default profile at index 0.
 func (g *Generator) Default() (*Profile, error) {
-	if len(g.profiles) == 0 {
-		return g.nth(0)
-	}
-	return g.profiles[0], nil
+	return g.nth(0)
 }
 
 // At returns the profile previously generated at index, or nil.
 func (g *Generator) At(index int64) *Profile {
-	for _, p := range g.profiles {
-		if p.index == index {
-			return p
-		}
-	}
-	return nil
+	return g.profiles[index]
 }
 
-// IndexOf returns the index of the profile, or -1 if it is unknown.
+// IndexOf returns the index of the profile, or -1 if it is unknown or was
+// derived by a different source.
 func (g *Generator) IndexOf(p *Profile) int64 {
+	if !g.sameSourceOf(p) {
+		return -1
+	}
 	return p.index
 }
 
 // Len returns the number of profiles generated so far.
 func (g *Generator) Len() int { return len(g.profiles) }
 
+// nth derives and caches the profile at index n (idempotent).
 func (g *Generator) nth(n int64) (*Profile, error) {
+	if cached := g.profiles[n]; cached != nil {
+		return cached, nil
+	}
+
+	if g.generator == nil {
+		return nil, fmt.Errorf("profile: a driver is required to generate profiles")
+	}
+
 	seed, err := g.seeder()
 	if err != nil {
 		return nil, err
@@ -159,7 +182,8 @@ func (g *Generator) nth(n int64) (*Profile, error) {
 	}
 	p.index = n
 	p.seed = append([]byte(nil), seed...)
-	g.profiles = append(g.profiles, p)
+	p.source = g.source
+	g.profiles[n] = p
 	return p, nil
 }
 

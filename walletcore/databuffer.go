@@ -8,124 +8,115 @@ import (
 	"github.com/dusk-network/w3sper-go/driver"
 )
 
-// These data-buffer helpers mirror w3sper.js `src/protocol-driver/buffer.js`.
-// A "DataBuffer" is a byte layout used to transfer note batches to/from the
-// wallet-core WASM:
+// These DataBuffer helpers mirror w3sper.js `src/protocol-driver/buffer.js` and
+// the wallet-core `mem::read_buffer`/`write_len_prefixed` ABI.
 //
-//	[0..4)  u32 little-endian total content length (excl. the 4-byte header)
-//	[4..)   concatenated items (flattened)
-//	[-8..)  layout footer: u32 alignment, u32 item size
+// An input DataBuffer is laid out as:
 //
-// Independent single values are packed with just the 4-byte length header.
+//	[0..4)   u32 little-endian content length (content + 8-byte footer)
+//	[4..)    concatenated items (flattened)
+//	[-8..)   layout footer: u32 alignment, u32 item count
+//
+// The caller passes the pointer to the leading u32 length. wallet-core reads it
+// with `read_buffer` and parses the following bytes as an rkyv archive that
+// ends with the same 8-byte layout footer.
+//
+// wallet-core's in-place outputs (e.g. `pick_notes`) instead use:
+//
+//	[0..4)  u32 byte length
+//	[4..)   serialized payload
+// Heap-allocated outputs (e.g. `write_len_prefixed`) use the same shape.
 
-// packNotesValues packs the note value bytes (each itemSize long) into a
-// DataBuffer for the `balance` / note-sync calls. It returns the buffer bytes.
-func (w *WalletCore) packNotesValues(ctx context.Context, notes []driver.Note) ([]byte, uint32, error) {
-	itemSize := w.glob.ItemSize
-
-	// total content length = sum of item sizes
-	total := uint32(len(notes)) * itemSize
-	contentLen := total + 8 // reserve layout footer
-
-	// buffer: 4-byte length header + content + 8-byte layout
-	buf := make([]byte, 4+contentLen)
-	binary.LittleEndian.PutUint32(buf[0:4], contentLen)
-
-	off := uint32(4)
-	for _, n := range notes {
-		value := n.Value
-		if len(value) != int(itemSize) {
-			return nil, 0, fmt.Errorf("walletcore: note value size %d, want %d", len(value), itemSize)
-		}
-		copy(buf[off:], value)
-		off += itemSize
-	}
-
-	setLayout(buf[4+total:], uint32(len(notes)))
-
-	ptr, err := w.box(ctx, buf)
-	if err != nil {
-		return nil, 0, err
-	}
-	return buf, ptr, nil
+// newDataBuffer builds a DataBuffer from a caller-provided content buffer and
+// item count, returning bytes with the length header and layout footer set.
+// It is the Go equivalent of buffer.js `from`: content already contains the
+// flattened items.
+func newDataBuffer(content []byte, count uint32) []byte {
+	buf := make([]byte, 4+len(content)+8)
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(content))+8)
+	copy(buf[4:], content)
+	_ = setLayout(buf[4:], count)
+	return buf
 }
 
-// setLayout writes the alignment and item-size footer used by buffer.js.
-func setLayout(footer []byte, size uint32) {
-	totalLength := len(footer)
-	align := uint32(0) - uint32((totalLength+3)&^3)
-	binary.LittleEndian.PutUint32(footer[len(footer)-8:], align)
-	binary.LittleEndian.PutUint32(footer[len(footer)-4:], size)
+// setLayout writes the alignment and item-count footer used by buffer.js.
+// dataAndFooter must be the region after the 4-byte length header (content
+// followed by the 8-byte footer). It matches the JavaScript `setLayout`, which
+// derives alignment from the content length (len - 8).
+//
+// An empty collection retains a zeroed footer, matching buffer.js.
+func setLayout(dataAndFooter []byte, count uint32) error {
+	if len(dataAndFooter) < 8 {
+		return fmt.Errorf("databuffer: missing layout footer")
+	}
+	if count == 0 {
+		return nil
+	}
+	contentLen := len(dataAndFooter) - 8
+	align := uint32(0) - uint32((contentLen+3)&^3)
+	binary.LittleEndian.PutUint32(dataAndFooter[len(dataAndFooter)-8:], align)
+	binary.LittleEndian.PutUint32(dataAndFooter[len(dataAndFooter)-4:], count)
+	return nil
 }
 
-// packNoteEntries packs the notes as key||value entries into a DataBuffer. The
-// pointer returned is the address of the 4-byte length header.
-func (w *WalletCore) packNoteEntries(ctx context.Context, notes []driver.Note, includeTrailingSize bool) (uint32, error) {
-	keySize := w.glob.KeySize
-	itemSize := w.glob.ItemSize
-	entrySize := keySize + itemSize
-
-	total := uint32(len(notes)) * entrySize
-	contentLen := total + 8
-
-	buf := make([]byte, 4+contentLen)
-	binary.LittleEndian.PutUint32(buf[0:4], contentLen)
-
-	off := uint32(4)
-	for _, n := range notes {
-		key := n.Nullifier
-		if len(key) != int(keySize) {
-			return 0, fmt.Errorf("walletcore: note key size %d, want %d", len(key), keySize)
-		}
-		copy(buf[off:], key)
-		off += keySize
-
-		value := n.Value
-		if len(value) != int(itemSize) {
-			return 0, fmt.Errorf("walletcore: note value size %d, want %d", len(value), itemSize)
-		}
-		copy(buf[off:], value)
-		off += itemSize
-	}
-
-	if includeTrailingSize {
-		// mirror map_owned: entries + trailing item count
-		binary.LittleEndian.PutUint32(buf[off:], uint32(len(notes)))
-		off += 4
-	}
-
+// boxDataBuffer writes buf into WASM memory and returns the pointer to the
+// leading length header.
+func (w *WalletCore) boxDataBuffer(ctx context.Context, buf []byte) (uint32, error) {
 	return w.box(ctx, buf)
 }
 
-// packNoteValuesDataBuffer packs the note value bytes into a DataBuffer and
-// returns the pointer to the 4-byte length header.
-func (w *WalletCore) packNoteValuesDataBuffer(ctx context.Context, notes []driver.Note) (uint32, error) {
-	total, entries, err := w.noteValuesContent(ctx, notes)
-	if err != nil {
-		return 0, err
-	}
-	buf := make([]byte, 4+total+8)
-	binary.LittleEndian.PutUint32(buf[0:4], total+8)
-	copy(buf[4:], entries)
-	setLayout(buf[4+total:], uint32(len(notes)))
-	return w.box(ctx, buf)
-}
-
-// noteValuesContent concatenates the note values (each itemSize long).
-func (w *WalletCore) noteValuesContent(ctx context.Context, notes []driver.Note) (uint32, []byte, error) {
+// noteValuesContent concatenates the note value bytes (each itemSize long).
+func (w *WalletCore) noteValuesContent(ctx context.Context, notes []driver.Note) ([]byte, uint32, error) {
 	itemSize := w.glob.ItemSize
 	content := make([]byte, 0, len(notes)*int(itemSize))
 	for _, n := range notes {
 		if len(n.Value) != int(itemSize) {
-			return 0, nil, fmt.Errorf("walletcore: note value size %d, want %d", len(n.Value), itemSize)
+			return nil, 0, fmt.Errorf("walletcore: note value size %d, want %d", len(n.Value), itemSize)
 		}
 		content = append(content, n.Value...)
 	}
-	return uint32(len(content)), content, nil
+	return content, uint32(len(notes)), nil
 }
 
-// packOpeningsDataBuffer packs the merkle openings into a DataBuffer.
-func (w *WalletCore) packOpeningsDataBuffer(ctx context.Context, openings [][]byte) (uint32, error) {
+// noteEntriesContent concatenates each note as key||value.
+func (w *WalletCore) noteEntriesContent(ctx context.Context, notes []driver.Note) ([]byte, uint32, error) {
+	keySize := w.glob.KeySize
+	itemSize := w.glob.ItemSize
+	entrySize := keySize + itemSize
+	content := make([]byte, 0, len(notes)*int(entrySize))
+	for _, n := range notes {
+		if len(n.Nullifier) != int(keySize) {
+			return nil, 0, fmt.Errorf("walletcore: note key size %d, want %d", len(n.Nullifier), keySize)
+		}
+		if len(n.Value) != int(itemSize) {
+			return nil, 0, fmt.Errorf("walletcore: note value size %d, want %d", len(n.Value), itemSize)
+		}
+		content = append(content, n.Nullifier...)
+		content = append(content, n.Value...)
+	}
+	return content, uint32(len(notes)), nil
+}
+
+// boxNotesValues produces and returns a DataBuffer of note values.
+func (w *WalletCore) boxNotesValues(ctx context.Context, notes []driver.Note) (uint32, error) {
+	content, count, err := w.noteValuesContent(ctx, notes)
+	if err != nil {
+		return 0, err
+	}
+	return w.boxDataBuffer(ctx, newDataBuffer(content, count))
+}
+
+// boxNoteEntries produces and returns a DataBuffer of key||value note entries.
+func (w *WalletCore) boxNoteEntries(ctx context.Context, notes []driver.Note) (uint32, error) {
+	content, count, err := w.noteEntriesContent(ctx, notes)
+	if err != nil {
+		return 0, err
+	}
+	return w.boxDataBuffer(ctx, newDataBuffer(content, count))
+}
+
+// boxOpenings produces and returns a DataBuffer of merkle openings.
+func (w *WalletCore) boxOpenings(ctx context.Context, openings [][]byte) (uint32, error) {
 	total := 0
 	for _, o := range openings {
 		total += len(o)
@@ -134,16 +125,12 @@ func (w *WalletCore) packOpeningsDataBuffer(ctx context.Context, openings [][]by
 	for _, o := range openings {
 		content = append(content, o...)
 	}
-	buf := make([]byte, 4+len(content)+8)
-	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(content))+8)
-	copy(buf[4:], content)
-	setLayout(buf[4+len(content):], uint32(len(openings)))
-	return w.box(ctx, buf)
+	return w.boxDataBuffer(ctx, newDataBuffer(content, uint32(len(openings))))
 }
 
-// readPickedNotes reads a set of picked notes from a DataBuffer written in
-// place by pick_notes. The buffer starts with a u32 length followed by
-// key||value entries.
+// readPickedNotes reads the notes pick_notes writes in place at ptr. After the
+// call, ptr points to [u32 length][serialized picked-note entries]. The picked
+// note list is serialized with the same key||value entry layout.
 func (w *WalletCore) readPickedNotes(ctx context.Context, ptr uint32) ([]driver.Note, error) {
 	length, err := w.readU32(ctx, ptr)
 	if err != nil {
@@ -158,26 +145,24 @@ func (w *WalletCore) readPickedNotes(ctx context.Context, ptr uint32) ([]driver.
 		return nil, err
 	}
 
-	count := len(raw) / int(entrySize)
-	if len(raw) < 4 {
-		count = 0
-	}
-	// The last 4 bytes may be the trailing length; use it as the count when
-	// present.
-	trailing := binary.LittleEndian.Uint32(raw[len(raw)-4:])
-	if int(trailing) == count {
-		count = int(trailing)
+	// The payload ends with an 8-byte layout footer (align + count) from the
+	// note list serialization. Parse entries from the content region.
+	content := raw
+	if len(raw) >= 8 {
+		count := binary.LittleEndian.Uint32(raw[len(raw)-4:])
+		content = raw[:len(raw)-8]
+		if int(count)*int(entrySize) <= len(content) {
+			// Re-slice strictly to count entries.
+			content = content[:int(count)*int(entrySize)]
+		}
 	}
 
-	result := make([]driver.Note, 0, count)
-	for i := 0; i < len(raw)-4 && len(result) < count; i += int(entrySize) {
-		if i+int(entrySize) > len(raw) {
-			break
-		}
+	result := make([]driver.Note, 0, len(content)/int(entrySize))
+	for i := 0; i+int(entrySize) <= len(content); i += int(entrySize) {
 		key := make([]byte, keySize)
-		copy(key, raw[i:])
+		copy(key, content[i:])
 		value := make([]byte, itemSize)
-		copy(value, raw[i+int(keySize):])
+		copy(value, content[i+int(keySize):])
 		result = append(result, driver.Note{Nullifier: key, Value: value})
 	}
 	return result, nil
@@ -189,4 +174,8 @@ func leUint64(b []byte) uint64 {
 
 func putLeUint64(b []byte, v uint64) {
 	binary.LittleEndian.PutUint64(b, v)
+}
+
+func putLeUint32(b []byte, v uint32) {
+	binary.LittleEndian.PutUint32(b, v)
 }

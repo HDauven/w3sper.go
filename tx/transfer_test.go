@@ -17,7 +17,11 @@ type mockDriver struct {
 
 func (m *mockDriver) GenerateProfile(seed []byte, index uint64) ([]byte, error) {
 	buf := make([]byte, profile.ProfileLen)
-	copy(buf, seed[:profile.ProfileLen])
+	// Place the seed at the start and fill the remainder deterministically.
+	copy(buf, seed)
+	for i := 64; i < len(buf); i++ {
+		buf[i] = byte(i)
+	}
 	return buf, nil
 }
 
@@ -123,6 +127,42 @@ func TestTransferToRejectsInvalid(t *testing.T) {
 }
 
 func mustProfile(t *testing.T) *profile.Profile {
+	t.Helper()
+	md := &mockDriver{}
+	seed := make([]byte, 64)
+	for i := range seed {
+		seed[i] = byte(i*3 + 1)
+	}
+	gen := profile.NewGenerator(func() ([]byte, error) { return seed, nil }, md)
+	p, err := gen.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestAccountTransferRequiresSeed verifies that a profile parsed from public
+// keys alone (no seed) cannot silently become a signer using its own public
+// account key as seed material.
+func TestAccountTransferRequiresSeed(t *testing.T) {
+	md := &mockDriver{}
+	entry := NewBookEntry(seedlessProfile(t), mockTreasury{}, md)
+	tr := NewTransfer(entry).Amount(big.NewInt(1)).Chain(1)
+	routed, err := tr.To(receiverAccountKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = routed.Account.Build()
+	if err == nil {
+		t.Fatal("expected error signing with a seedless profile")
+	}
+	if md.called {
+		t.Fatal("driver.Moonlight was called for a seedless profile")
+	}
+}
+
+// seedlessProfile builds a profile parsed purely from public bytes.
+func seedlessProfile(t *testing.T) *profile.Profile {
 	t.Helper()
 	buf := make([]byte, profile.ProfileLen)
 	for i := range buf {

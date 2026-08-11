@@ -120,8 +120,13 @@ func (a *AccountTransfer) Build() (*NonceResult, error) {
 	}
 	nonce = new(big.Int).Add(nonce, big.NewInt(1))
 
+	seed, err := a.profileSeed()
+	if err != nil {
+		return nil, err
+	}
+
 	in := driver.MoonlightInput{
-		Seed:          a.profileSeed(),
+		Seed:          seed,
 		SenderIndex:   a.profileIndex(),
 		Receiver:      a.attrs.receiver,
 		TransferValue: amount,

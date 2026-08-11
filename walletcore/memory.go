@@ -6,7 +6,13 @@ import (
 	"fmt"
 )
 
-// alloc allocates n bytes in WASM memory and returns the pointer.
+// Memory helpers mirror the JS allocator plus the wallet-core malloc/free ABI.
+// wallet-core's `free(ptr, size)` requires the allocation length, so every
+// allocation is size-tracked in w.allocs. All callers operate under the
+// instance lock (runLocked), so the map needs no separate synchronization.
+
+// alloc allocates n bytes in WASM memory, records their size, and returns the
+// pointer.
 func (w *WalletCore) alloc(ctx context.Context, n uint32) (uint32, error) {
 	fn := w.mod.ExportedFunction("malloc")
 	if fn == nil {
@@ -16,17 +22,37 @@ func (w *WalletCore) alloc(ctx context.Context, n uint32) (uint32, error) {
 	if err != nil {
 		return 0, fmt.Errorf("walletcore: malloc(%d): %w", n, err)
 	}
-	return uint32(res[0]), nil
+	ptr := uint32(res[0])
+	w.track(ptr, n)
+	return ptr, nil
 }
 
-// free releases an allocation.
-func (w *WalletCore) free(ctx context.Context, ptr uint32) error {
+// track records an allocation's size.
+func (w *WalletCore) track(ptr, size uint32) {
+	if w.allocs == nil {
+		w.allocs = make(map[uint32]uint32)
+	}
+	if size > 0 {
+		w.allocs[ptr] = size
+	}
+}
+
+// free releases a previously tracked allocation. If an out-of-line size is
+// provided (for untracked wallet-core output allocations), it is used directly.
+func (w *WalletCore) free(ctx context.Context, ptr uint32, outOfLineSize ...uint32) error {
+	var size uint32
+	if len(outOfLineSize) > 0 {
+		size = outOfLineSize[0]
+	} else if s, ok := w.allocs[ptr]; ok {
+		size = s
+		delete(w.allocs, ptr)
+	}
+
 	fn := w.mod.ExportedFunction("free")
 	if fn == nil {
 		return nil
 	}
-	_, err := fn.Call(ctx, uint64(ptr))
-	if err != nil {
+	if _, err := fn.Call(ctx, uint64(ptr), uint64(size)); err != nil {
 		return fmt.Errorf("walletcore: free(%d): %w", ptr, err)
 	}
 	return nil
@@ -40,13 +66,22 @@ func (w *WalletCore) writeBytes(ctx context.Context, ptr uint32, b []byte) error
 	return nil
 }
 
-// readBytes reads n bytes from memory at ptr.
+// readBytes reads n bytes from memory at ptr and returns an owned copy.
 func (w *WalletCore) readBytes(ctx context.Context, ptr uint32, n uint32) ([]byte, error) {
-	out, ok := w.mod.Memory().Read(ptr, n)
+	view, ok := w.mod.Memory().Read(ptr, n)
 	if !ok {
 		return nil, fmt.Errorf("walletcore: mem read out of bounds at %d len %d", ptr, n)
 	}
-	return out, nil
+	return cloneBytes(view), nil
+}
+
+// cloneBytes copies a wazero memory view into a Go-owned slice. Wazero memory
+// reads are views into linear memory that may be reused later; copying protects
+// callers from silent aliasing.
+func cloneBytes(in []byte) []byte {
+	out := make([]byte, len(in))
+	copy(out, in)
+	return out
 }
 
 // box allocates n bytes and copies src into them, returning the pointer.
@@ -93,31 +128,46 @@ func (w *WalletCore) readU64(ctx context.Context, ptr uint32) (uint64, error) {
 	return binary.LittleEndian.Uint64(b), nil
 }
 
-// readLenPrefixed reads a u32 length at ptr followed by that many bytes at
-// ptr+4. This is the DataBuffer layout produced by buffer.js `from`.
-func (w *WalletCore) readLenPrefixed(ctx context.Context, ptr uint32) ([]byte, error) {
-	length, err := w.readU32(ctx, ptr)
+// takeLenPrefixedOutput reads the pointer stored at slot (a pointer handle),
+// where the pointed-to allocation is produced by wallet-core's
+// write_len_prefixed: [u32 len][bytes]. It returns an owned copy of the payload
+// and frees the WASM allocation. includeLength controls whether the leading
+// 4-byte length is included in the returned payload.
+func (w *WalletCore) takeLenPrefixedOutput(ctx context.Context, slot uint32, includeLength bool) ([]byte, error) {
+	// The slot stores the allocation pointer.
+	target, err := w.readU32(ctx, slot)
 	if err != nil {
 		return nil, err
 	}
-	return w.readBytes(ctx, ptr+4, length)
+	return w.takeAt(ctx, target, includeLength)
 }
 
-// readLengthPointer reads the target pointer stored at ptr (a pointer handle),
-// then reads a u32 length at that target and the following bytes (excluding the
-// length prefix). This mirrors reading a returned boxed databuffer.
-func (w *WalletCore) readBoxedDatabuffer(ctx context.Context, ptr uint32, includeLength bool) ([]byte, error) {
-	target, err := w.readU32(ctx, ptr)
-	if err != nil {
-		return nil, err
-	}
+// takeAt reads and frees a length-prefixed allocation at target.
+func (w *WalletCore) takeAt(ctx context.Context, target uint32, includeLength bool) ([]byte, error) {
 	length, err := w.readU32(ctx, target)
 	if err != nil {
 		return nil, err
 	}
-	offset := uint32(0)
-	if !includeLength {
-		offset = 4
+
+	// Read the payload first (owned copy).
+	var payload []byte
+	if includeLength {
+		payload, err = w.readBytes(ctx, target, 4+length)
+	} else {
+		payload, err = w.readBytes(ctx, target+4, length)
 	}
-	return w.readBytes(ctx, target+offset, length)
+	if err != nil {
+		_ = w.free(ctx, target)
+		return nil, err
+	}
+
+	// Release the wallet-core-owned allocation out-of-line.
+	release := target
+	fn := w.mod.ExportedFunction("free")
+	if fn != nil {
+		// free(ptr, size) where size = 4 + length.
+		_, _ = fn.Call(ctx, uint64(release), uint64(4+length))
+	}
+
+	return payload, nil
 }
