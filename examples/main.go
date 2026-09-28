@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/dusk-network/w3sper-go"
-	"github.com/dusk-network/w3sper-go/driver"
-	"github.com/dusk-network/w3sper-go/profile"
-	"github.com/dusk-network/w3sper-go/tx"
-	"github.com/dusk-network/w3sper-go/walletcore"
+	"github.com/HDauven/w3sper.go"
+	"github.com/HDauven/w3sper.go/driver"
+	"github.com/HDauven/w3sper.go/profile"
+	"github.com/HDauven/w3sper.go/tx"
+	"github.com/HDauven/w3sper.go/walletcore"
 )
 
 // memTreasury is a trivial in-memory treasury returning a fixed balance.

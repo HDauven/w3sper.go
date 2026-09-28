@@ -6,7 +6,7 @@ package profile
 import (
 	"fmt"
 
-	"github.com/dusk-network/w3sper-go/base58"
+	"github.com/HDauven/w3sper.go/base58"
 )
 
 const (

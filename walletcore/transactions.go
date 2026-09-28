@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/dusk-network/w3sper-go/driver"
+	"github.com/HDauven/w3sper.go/driver"
 )
 
 // randRead fills b with cryptographically secure random bytes.

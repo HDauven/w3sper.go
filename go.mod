@@ -1,4 +1,4 @@
-module github.com/dusk-network/w3sper-go
+module github.com/HDauven/w3sper.go
 
 go 1.25.0
 

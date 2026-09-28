@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/dusk-network/w3sper-go/driver"
-	"github.com/dusk-network/w3sper-go/gas"
-	"github.com/dusk-network/w3sper-go/profile"
+	"github.com/HDauven/w3sper.go/driver"
+	"github.com/HDauven/w3sper.go/gas"
+	"github.com/HDauven/w3sper.go/profile"
 )
 
 // Transfer is a fluent value-transfer builder. Use [Transfer.To] to select the

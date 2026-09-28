@@ -5,7 +5,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/dusk-network/w3sper-go/driver"
+	"github.com/HDauven/w3sper.go/driver"
 )
 
 // testWallet loads a fresh wallet-core instance for a test.

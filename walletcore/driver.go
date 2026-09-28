@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/dusk-network/w3sper-go/driver"
-	"github.com/dusk-network/w3sper-go/profile"
+	"github.com/HDauven/w3sper.go/driver"
+	"github.com/HDauven/w3sper.go/profile"
 )
 
 // GenerateProfile derives a 160-byte profile buffer (address || account) from

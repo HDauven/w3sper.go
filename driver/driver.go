@@ -9,7 +9,7 @@ package driver
 import (
 	"math/big"
 
-	"github.com/dusk-network/w3sper-go/profile"
+	"github.com/HDauven/w3sper.go/profile"
 )
 
 // Note is a raw phoneix note entry (nullifier key : note value) as returned by

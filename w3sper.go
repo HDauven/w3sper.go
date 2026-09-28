@@ -12,16 +12,16 @@
 package w3sper
 
 import (
-	"github.com/dusk-network/w3sper-go/base16"
-	"github.com/dusk-network/w3sper-go/base58"
-	"github.com/dusk-network/w3sper-go/bookmark"
-	"github.com/dusk-network/w3sper-go/chainid"
-	"github.com/dusk-network/w3sper-go/driver"
-	"github.com/dusk-network/w3sper-go/gas"
-	"github.com/dusk-network/w3sper-go/lux"
-	"github.com/dusk-network/w3sper-go/network"
-	"github.com/dusk-network/w3sper-go/profile"
-	"github.com/dusk-network/w3sper-go/tx"
+	"github.com/HDauven/w3sper.go/base16"
+	"github.com/HDauven/w3sper.go/base58"
+	"github.com/HDauven/w3sper.go/bookmark"
+	"github.com/HDauven/w3sper.go/chainid"
+	"github.com/HDauven/w3sper.go/driver"
+	"github.com/HDauven/w3sper.go/gas"
+	"github.com/HDauven/w3sper.go/lux"
+	"github.com/HDauven/w3sper.go/network"
+	"github.com/HDauven/w3sper.go/profile"
+	"github.com/HDauven/w3sper.go/tx"
 	"math/big"
 )
 

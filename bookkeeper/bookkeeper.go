@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/dusk-network/w3sper-go/driver"
-	"github.com/dusk-network/w3sper-go/profile"
-	"github.com/dusk-network/w3sper-go/tx"
+	"github.com/HDauven/w3sper.go/driver"
+	"github.com/HDauven/w3sper.go/profile"
+	"github.com/HDauven/w3sper.go/tx"
 )
 
 // Treasury is the same interface consumed by the tx builders.

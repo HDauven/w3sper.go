@@ -1,9 +1,17 @@
 # w3sper Go SDK
 
-`w3sper.go` is a Go port of the Dusk Network `w3sper` SDK (the JavaScript SDK
-lives in `../w3sper.js`). It lets Go applications interact with a Dusk Rusk
-node: manage profiles, convert value units, validate chain identifiers, query
-the node over GraphQL, and build and sign transactions.
+`w3sper.go` is an independently maintained Go port of the Dusk Network
+`w3sper` SDK, hosted at [`HDauven/w3sper.go`](https://github.com/HDauven/w3sper.go).
+It lets Go applications manage profiles, convert value units, validate chain
+identifiers, query a Dusk Rusk node over GraphQL, and build and sign transactions.
+
+This experimental project was extracted from
+[Dusk Rusk PR #359](https://github.com/dusk-network/rusk-private/pull/359)
+at commit `e096a859f55a8e2bb3583bdb44ceed52ba4d7110`. The three Go SDK commits
+retain their original authorship and dates; only their SDK subtrees are carried
+into this repository. The original Dusk MPL-2.0 license is retained.
+The embedded wallet-core WASM is unchanged from that revision. Compatibility
+with current live networks has not been established by this extraction.
 
 It does **not** reimplement the Dusk cryptography. Instead it reuses the same
 `wallet-core` WASM artifact the JavaScript SDK bundles, executed from Go with
@@ -97,18 +105,26 @@ layering:
 
 ```
 w3sper.go/
-  go.mod            module github.com/dusk-network/w3sper-go
+  go.mod            module github.com/HDauven/w3sper.go
   w3sper.go         root package, re-exports
   lux/ gas/ chainid/ base16/ base58/ bookmark/
   profile/ network/ driver/ tx/ bookkeeper/ walletcore/
-  .github/workflows/w3spergo_ci.yml   (Go CI)
+  .github/workflows/ci.yml   (Go CI)
 ```
 
-> **Module path:** the module lives at `dusk-network/rusk-private/w3sper.go` but
-> declares `module github.com/dusk-network/w3sper-go`. That path is only
-> meaningful once it is extracted into its own `dusk-network/w3sper-go` repo.
-> While it remains nested, the module path and any tags should be prefixed
-> (e.g. `github.com/dusk-network/rusk-private/w3sper.go`).
+## Install
+
+Requires Go 1.25 or newer. This is a private repository: authenticate Git with
+GitHub first, and include `github.com/HDauven/w3sper.go` in `GOPRIVATE` to avoid
+sending private module requests to the public Go proxy or checksum database.
+For example, from your application's Go module:
+
+```sh
+GOPRIVATE=github.com/HDauven/w3sper.go go get github.com/HDauven/w3sper.go@latest
+```
+
+If you already use `GOPRIVATE`, append this module to your existing patterns
+rather than replacing them.
 
 ## Usage
 
@@ -120,7 +136,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/dusk-network/w3sper-go"
+	"github.com/HDauven/w3sper.go"
 )
 
 func main() {
@@ -137,8 +153,9 @@ func main() {
 
 ## Build & test
 
+From the repository root:
+
 ```sh
-cd w3sper.go
 go build ./...
 go test -shuffle=on ./...
 go test -race ./...
@@ -146,9 +163,10 @@ go vet ./...
 gofmt -l .
 ```
 
-CI runs these from `w3sper.go` via `.github/workflows/w3spergo_ci.yml`
-(staticcheck / govulncheck run when available).
+CI runs from the repository root on GitHub-hosted Ubuntu with Go 1.27,
+including pinned staticcheck and govulncheck versions. Run the offline signing
+example with `go run ./examples`; it does not submit a transaction.
 
 ## License
 
-This project is licensed under the [Mozilla Public License Version 2.0](../../LICENSE).
+This project is licensed under the [Mozilla Public License Version 2.0](LICENSE).

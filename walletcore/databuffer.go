@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/dusk-network/w3sper-go/driver"
+	"github.com/HDauven/w3sper.go/driver"
 )
 
 // These DataBuffer helpers mirror w3sper.js `src/protocol-driver/buffer.js` and

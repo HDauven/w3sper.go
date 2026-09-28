@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/dusk-network/w3sper-go/driver"
+	"github.com/HDauven/w3sper.go/driver"
 )
 
 // Boundary constants. Receiver/sender sizes come from wallet-core.

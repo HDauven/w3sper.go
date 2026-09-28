@@ -4,8 +4,8 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/dusk-network/w3sper-go/driver"
-	"github.com/dusk-network/w3sper-go/profile"
+	"github.com/HDauven/w3sper.go/driver"
+	"github.com/HDauven/w3sper.go/profile"
 )
 
 // mockDriver implements the driver.Driver interface for the account flow.
