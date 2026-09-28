@@ -96,12 +96,6 @@ func (b *Bookkeeper) accountBalance(key []byte) (tx.AccountBalance, error) {
 	return b.treasury.AccountBalance(key)
 }
 
-// addressBalance is not supported without an owner seed/index; see
-// ErrPhoenixUnavailable.
-func (b *Bookkeeper) addressBalance(key []byte) (*AddressBalance, error) {
-	return nil, ErrPhoenixUnavailable
-}
-
 func decodeKey(identifier string) ([]byte, error) {
 	if profile.TypeOf(identifier) == "undefined" {
 		return nil, fmt.Errorf("bookkeeper: invalid identifier")

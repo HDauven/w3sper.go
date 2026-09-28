@@ -96,20 +96,6 @@ func (w *WalletCore) box(ctx context.Context, src []byte) (uint32, error) {
 	return ptr, nil
 }
 
-// writeU32 writes a little-endian u32 at ptr.
-func (w *WalletCore) writeU32(ctx context.Context, ptr uint32, v uint32) error {
-	var b [4]byte
-	binary.LittleEndian.PutUint32(b[:], v)
-	return w.writeBytes(ctx, ptr, b[:])
-}
-
-// writeU64 writes a little-endian u64 at ptr.
-func (w *WalletCore) writeU64(ctx context.Context, ptr uint32, v uint64) error {
-	var b [8]byte
-	binary.LittleEndian.PutUint64(b[:], v)
-	return w.writeBytes(ctx, ptr, b[:])
-}
-
 // readU32 reads a little-endian u32 at ptr.
 func (w *WalletCore) readU32(ctx context.Context, ptr uint32) (uint32, error) {
 	b, err := w.readBytes(ctx, ptr, 4)
@@ -117,15 +103,6 @@ func (w *WalletCore) readU32(ctx context.Context, ptr uint32) (uint32, error) {
 		return 0, err
 	}
 	return binary.LittleEndian.Uint32(b), nil
-}
-
-// readU64 reads a little-endian u64 at ptr.
-func (w *WalletCore) readU64(ctx context.Context, ptr uint32) (uint64, error) {
-	b, err := w.readBytes(ctx, ptr, 8)
-	if err != nil {
-		return 0, err
-	}
-	return binary.LittleEndian.Uint64(b), nil
 }
 
 // takeLenPrefixedOutput reads the pointer stored at slot (a pointer handle),

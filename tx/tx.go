@@ -10,6 +10,7 @@
 package tx
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
@@ -44,7 +45,7 @@ type networkChainSource struct {
 }
 
 func (s *networkChainSource) ChainID() (int, error) {
-	info, err := network.NewNode(s.c).Info(nil)
+	info, err := network.NewNode(s.c).Info(context.Background())
 	if err != nil {
 		return 0, err
 	}
@@ -183,13 +184,6 @@ func (b *Builder) gas() *gas.Config {
 		return b.attrs.gas
 	}
 	return gas.New(nil, nil)
-}
-
-func (b *Builder) requireTreasury() (Treasury, error) {
-	if b.entry == nil || b.entry.treasury == nil {
-		return nil, fmt.Errorf("tx: a treasury is required")
-	}
-	return b.entry.treasury, nil
 }
 
 func (b *Builder) decodeReceiver(s string) ([]byte, error) {
