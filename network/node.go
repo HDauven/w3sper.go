@@ -5,83 +5,123 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"strings"
 )
 
-// NodeInfo is node metadata returned by a Rusk node.
 type NodeInfo struct {
-	ChainID int             `json:"chainId"`
-	Chain   json.RawMessage `json:"chain"`
-	Extra   map[string]json.RawMessage
+	ChainID int                        `json:"chainId"`
+	Chain   string                     `json:"chain"`
+	Extra   map[string]json.RawMessage `json:"extra"`
 }
+type Node struct{ client *Client }
 
-// Node wraps the node-related GraphQL queries.
-type Node struct {
-	client *Client
-}
-
-// NewNode returns a node component backed by the given client.
 func NewNode(c *Client) *Node { return &Node{client: c} }
 
-// Info fetches node metadata, including the network chain id.
+// Info uses the current /on/node/info RPC, not a nonexistent GraphQL chain().
 func (n *Node) Info(ctx context.Context) (*NodeInfo, error) {
-	data, err := n.client.Query(ctx, "chain() { header { chainId } }")
-	if err != nil {
-		return nil, err
+	b, e := n.client.Scope("node").Call(ctx, "info", nil)
+	if e != nil {
+		return nil, e
 	}
-	info := &NodeInfo{Extra: map[string]json.RawMessage{}}
+	var data map[string]json.RawMessage
+	if e = json.Unmarshal(b, &data); e != nil {
+		return nil, e
+	}
+	raw, ok := data["chain_id"]
+	if !ok {
+		return nil, fmt.Errorf("network: node info missing chain_id")
+	}
+	v, e := decodeBigInt(raw)
+	if e != nil || !v.IsUint64() || v.Uint64() > 255 {
+		return nil, fmt.Errorf("network: invalid chain_id %s", raw)
+	}
+	info := &NodeInfo{ChainID: int(v.Int64()), Chain: "unknown", Extra: make(map[string]json.RawMessage)}
+	chains := []string{"localnet", "mainnet", "testnet", "devnet"}
+	if info.ChainID < len(chains) {
+		info.Chain = chains[info.ChainID]
+	}
 	for k, v := range data {
-		info.Extra[k] = v
-	}
-	// Decode chainId from arbitrary nesting.
-	if raw, ok := data["chain"]; ok {
-		var chain struct {
-			Header struct {
-				ChainID int `json:"chainId"`
-			} `json:"header"`
+		parts := strings.Split(k, "_")
+		for i := 1; i < len(parts); i++ {
+			if len(parts[i]) > 0 {
+				parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
+			}
 		}
-		if err := json.Unmarshal(raw, &chain); err == nil {
-			info.ChainID = chain.Header.ChainID
-		}
+		info.Extra[strings.Join(parts, "")] = v
 	}
 	return info, nil
 }
-
-// BlockHeight returns the current block height as a big.Int.
-func (n *Node) BlockHeight(ctx context.Context) (*big.Int, error) {
-	data, err := n.client.Query(ctx, "block(height: -1) { header { height } }")
-	if err != nil {
-		return nil, err
+func (n *Node) CRS(ctx context.Context) ([]byte, error) {
+	return n.client.Scope("node").Call(ctx, "crs", nil)
+}
+func (n *Node) Provisioners(ctx context.Context) (json.RawMessage, error) {
+	b, e := n.client.Scope("node").Call(ctx, "provisioners", nil)
+	if e == nil && !json.Valid(b) {
+		e = fmt.Errorf("network: invalid provisioners JSON")
 	}
-	raw, ok := data["block"]
-	if !ok {
-		return big.NewInt(0), nil
+	return b, e
+}
+func (n *Node) BlockHeight(ctx context.Context) (*big.Int, error) {
+	data, e := n.client.Query(ctx, "block(height: -1) { header { height } }")
+	if e != nil {
+		return nil, e
 	}
 	var block struct {
 		Header struct {
 			Height json.RawMessage `json:"height"`
 		} `json:"header"`
 	}
-	if err := json.Unmarshal(raw, &block); err != nil {
-		return nil, err
+	if e = json.Unmarshal(data["block"], &block); e != nil {
+		return nil, e
 	}
-	return decodeBigInt(block.Header.Height)
+	v, e := decodeBigInt(block.Header.Height)
+	if e == nil && !v.IsUint64() {
+		return nil, fmt.Errorf("network: block height outside u64")
+	}
+	return v, e
 }
 
-// decodeBigInt reads a JSON number that may exceed int64 precision.
+// decodeBigInt never passes integers through floating point.
 func decodeBigInt(raw json.RawMessage) (*big.Int, error) {
-	if len(raw) == 0 {
-		return big.NewInt(0), nil
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		if v, ok := new(big.Int).SetString(s, 10); ok {
-			return v, nil
+	s := strings.TrimSpace(string(raw))
+	if strings.HasPrefix(s, "\"") {
+		if e := json.Unmarshal(raw, &s); e != nil {
+			return nil, e
 		}
-		return nil, fmt.Errorf("network: invalid bigint %q", s)
 	}
-	var f float64
-	if err := json.Unmarshal(raw, &f); err == nil {
-		return big.NewInt(int64(f)), nil
+	if s == "" {
+		return nil, fmt.Errorf("network: missing integer")
 	}
-	return nil, fmt.Errorf("network: invalid numeric value %s", raw)
+	for i, c := range s {
+		if c == '-' && i == 0 {
+			continue
+		}
+		if c < '0' || c > '9' {
+			return nil, fmt.Errorf("network: invalid integer %q", s)
+		}
+	}
+	v, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		return nil, fmt.Errorf("network: invalid integer %q", s)
+	}
+	return v, nil
+}
+func (c *Client) GasPrice(ctx context.Context) (map[string]*big.Int, error) {
+	b, e := c.Blocks().Call(ctx, "gas-price", nil)
+	if e != nil {
+		return nil, e
+	}
+	var data map[string]json.RawMessage
+	if e = json.Unmarshal(b, &data); e != nil {
+		return nil, e
+	}
+	out := make(map[string]*big.Int)
+	for k, b := range data {
+		v, e := decodeBigInt(b)
+		if e != nil || !v.IsUint64() {
+			return nil, fmt.Errorf("network: invalid gas price %s", b)
+		}
+		out[k] = v
+	}
+	return out, nil
 }

@@ -19,7 +19,7 @@ func (f *fakeDriver) GenerateProfile(seed []byte, index ProfileIndex) ([]byte, e
 
 func TestGeneratorNextAndIndex(t *testing.T) {
 	drv := &fakeDriver{}
-	seed := []byte("seed-material-0000000000000000000000")
+	seed := make([]byte, 64)
 	g := NewGenerator(func() ([]byte, error) { return seed, nil }, drv)
 
 	defaultP, err := g.Default()
@@ -60,7 +60,7 @@ func TestGeneratorSeederError(t *testing.T) {
 // returns -1 for an unknown source, without panicking (regression for comparing
 // non-comparable function sources).
 func TestGeneratorIndexOf(t *testing.T) {
-	seed := []byte("seed-material-0000000000000000000000")
+	seed := make([]byte, 64)
 	g := NewGenerator(func() ([]byte, error) { return seed, nil }, &fakeDriver{})
 
 	p, err := g.Default()
@@ -81,7 +81,8 @@ func TestGeneratorIndexOf(t *testing.T) {
 
 	// A profile derived by a different generator (different seed source) must
 	// not be attributed to this generator.
-	otherSeed := []byte("other-seed-00000000000000000000000000")
+	otherSeed := make([]byte, 64)
+	otherSeed[0] = 1
 	otherGen := NewGenerator(func() ([]byte, error) { return otherSeed, nil }, &fakeDriver{})
 	foreign, err := otherGen.Default()
 	if err != nil {
@@ -98,7 +99,7 @@ func TestGeneratorIndexOf(t *testing.T) {
 // TestGeneratorIndexExhaustion verifies that the wallet-core u8 index space is
 // honored: index 255 is the last valid, and index 256 is rejected.
 func TestGeneratorIndexExhaustion(t *testing.T) {
-	seed := []byte("seed-material-0000000000000000000000")
+	seed := make([]byte, 64)
 	g := NewGenerator(func() ([]byte, error) { return seed, nil }, &fakeDriver{})
 
 	var last *Profile

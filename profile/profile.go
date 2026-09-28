@@ -4,6 +4,7 @@
 package profile
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/HDauven/w3sper.go/base58"
@@ -41,7 +42,8 @@ type Driver interface {
 type sourceToken struct{ _ int }
 
 type Generator struct {
-	seeder    func() ([]byte, error)
+	gate      chan struct{}
+	seeder    func(context.Context) ([]byte, error)
 	generator Driver
 	profiles  map[int64]*Profile
 	nextIndex int64 // monotonic; starts at 1, index 0 is reserved for Default
@@ -51,14 +53,32 @@ type Generator struct {
 // NewGenerator returns a profile generator that derives profiles from seeds
 // produced by seeder and index n, using driver for cryptographic derivation.
 func NewGenerator(seeder func() ([]byte, error), driver Driver) *Generator {
-	return &Generator{
-		seeder:    seeder,
-		generator: driver,
-		profiles:  make(map[int64]*Profile),
-		nextIndex: 1,
-		source:    &sourceToken{},
+	return NewGeneratorContext(func(ctx context.Context) ([]byte, error) {
+		if e := ctx.Err(); e != nil {
+			return nil, e
+		}
+		if seeder == nil {
+			return nil, fmt.Errorf("profile: seed provider required")
+		}
+		return seeder()
+	}, driver)
+}
+
+// NewGeneratorContext lets wallet seed providers honor issuance cancellation.
+func NewGeneratorContext(seeder func(context.Context) ([]byte, error), driver Driver) *Generator {
+	g := &Generator{gate: make(chan struct{}, 1), seeder: seeder, generator: driver, profiles: make(map[int64]*Profile), nextIndex: 1, source: &sourceToken{}}
+	g.gate <- struct{}{}
+	return g
+}
+func (g *Generator) lock(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g.gate:
+		return nil
 	}
 }
+func (g *Generator) unlock() { g.gate <- struct{}{} }
 
 // sameSourceOf reports whether p was derived by this generator (same seed
 // source). Profile source identity is tested with a comparable pointer.
@@ -89,7 +109,6 @@ type Profile struct {
 	address *Key
 	account *Key
 	index   int64 // -1 until generated through a Generator
-	seed    []byte
 	source  *sourceToken
 }
 
@@ -127,24 +146,40 @@ func (p *Profile) Bytes() []byte {
 // produced by a generator.
 func (p *Profile) Index() int64 { return p.index }
 
-// Seed returns a copy of the seed this profile was derived from, or nil if it
-// was not derived by a [Generator].
-func (p *Profile) Seed() []byte {
-	if len(p.seed) == 0 {
-		return nil
+// Seed is retained for source compatibility. Profiles are public identities
+// and never retain seeds. Use Generator.Signer to issue signing authority.
+// Deprecated: always returns nil.
+func (p *Profile) Seed() []byte { return nil }
+
+// SameSourceOf reports whether both public identities came from this generator.
+func (p *Profile) SameSourceOf(other *Profile) bool {
+	return p != nil && other != nil && p.source != nil && p.source == other.source
+}
+
+// Derive returns the public identity at an explicitly selected index (0..255).
+func (g *Generator) Derive(index int64) (*Profile, error) {
+	return g.DeriveContext(context.Background(), index)
+}
+func (g *Generator) DeriveContext(ctx context.Context, index int64) (*Profile, error) {
+	if e := g.lock(ctx); e != nil {
+		return nil, e
 	}
-	out := make([]byte, len(p.seed))
-	copy(out, p.seed)
-	return out
+	defer g.unlock()
+	return g.nthContext(ctx, index)
 }
 
 // Next derives and returns the next profile, advancing a monotonic index that
 // skips the default (index 0) profile until it has been generated.
-func (g *Generator) Next() (*Profile, error) {
+func (g *Generator) Next() (*Profile, error) { return g.NextContext(context.Background()) }
+func (g *Generator) NextContext(ctx context.Context) (*Profile, error) {
+	if e := g.lock(ctx); e != nil {
+		return nil, e
+	}
+	defer g.unlock()
 	if g.nextIndex > MaxProfileIndex {
 		return nil, fmt.Errorf("profile: cannot derive beyond index %d (wallet-core u8 index space)", MaxProfileIndex)
 	}
-	p, err := g.nth(g.nextIndex)
+	p, err := g.nthContext(ctx, g.nextIndex)
 	if err != nil {
 		return nil, err
 	}
@@ -154,11 +189,13 @@ func (g *Generator) Next() (*Profile, error) {
 
 // Default returns (and caches) the default profile at index 0.
 func (g *Generator) Default() (*Profile, error) {
-	return g.nth(0)
+	return g.Derive(0)
 }
 
 // At returns the profile previously generated at index, or nil.
 func (g *Generator) At(index int64) *Profile {
+	_ = g.lock(context.Background())
+	defer g.unlock()
 	return g.profiles[index]
 }
 
@@ -172,10 +209,18 @@ func (g *Generator) IndexOf(p *Profile) int64 {
 }
 
 // Len returns the number of profiles generated so far.
-func (g *Generator) Len() int { return len(g.profiles) }
+func (g *Generator) Len() int {
+	_ = g.lock(context.Background())
+	defer g.unlock()
+	return len(g.profiles)
+}
 
 // nth derives and caches the profile at index n (idempotent).
-func (g *Generator) nth(n int64) (*Profile, error) {
+func (g *Generator) nth(n int64) (*Profile, error) { return g.nthContext(context.Background(), n) }
+func (g *Generator) nthContext(ctx context.Context, n int64) (*Profile, error) {
+	if e := ctx.Err(); e != nil {
+		return nil, e
+	}
 	if !validIndex(n) {
 		return nil, fmt.Errorf("profile: index %d out of range [0, %d]", n, MaxProfileIndex)
 	}
@@ -187,12 +232,30 @@ func (g *Generator) nth(n int64) (*Profile, error) {
 		return nil, fmt.Errorf("profile: a driver is required to generate profiles")
 	}
 
-	seed, err := g.seeder()
+	if g.seeder == nil {
+		return nil, fmt.Errorf("profile: seed provider is required")
+	}
+	seed, err := g.seeder(ctx)
 	if err != nil {
 		return nil, err
 	}
-	buf, err := g.generator.GenerateProfile(seed, ProfileIndex(n))
+	seed = append([]byte(nil), seed...)
+	defer clear(seed)
+	if len(seed) != 64 {
+		return nil, fmt.Errorf("profile: seed must contain exactly 64 bytes")
+	}
+	var buf []byte
+	if d, ok := g.generator.(interface {
+		GenerateProfileContext(context.Context, []byte, ProfileIndex) ([]byte, error)
+	}); ok {
+		buf, err = d.GenerateProfileContext(ctx, seed, ProfileIndex(n))
+	} else {
+		buf, err = g.generator.GenerateProfile(seed, ProfileIndex(n))
+	}
 	if err != nil {
+		return nil, err
+	}
+	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
 	p, err := newProfile(buf)
@@ -200,7 +263,6 @@ func (g *Generator) nth(n int64) (*Profile, error) {
 		return nil, err
 	}
 	p.index = n
-	p.seed = append([]byte(nil), seed...)
 	p.source = g.source
 	g.profiles[n] = p
 	return p, nil

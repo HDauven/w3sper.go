@@ -56,7 +56,7 @@ func (fakeDriver) MinimumStake() (*big.Int, error) {
 
 func TestBookkeeperAccountBalance(t *testing.T) {
 	b := New(fakeTreasury{}, nil)
-	bal, err := b.Balance(accountKey(t))
+	bal, err := b.Balance(testAccountKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestBookkeeperMinimumStake(t *testing.T) {
 	}
 }
 
-func accountKey(t *testing.T) string {
+func testAccountKey(t *testing.T) string {
 	t.Helper()
 	return profile.EncodeAccount(make([]byte, profile.AccountKeyLen))
 }

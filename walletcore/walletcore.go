@@ -11,7 +11,7 @@
 // # Concurrency
 //
 // A [WalletCore] is a single WASM instance with one linear memory. Calls are
-// serialized with an internal mutex, so methods are safe for concurrent use
+// serialized with a cancelable gate, so methods are safe for concurrent use
 // but do not run in parallel. Create multiple instances for parallel, isolated
 // workers.
 package walletcore
@@ -20,7 +20,6 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
-	"sync"
 
 	"github.com/HDauven/w3sper.go/driver"
 	"github.com/tetratelabs/wazero"
@@ -53,7 +52,7 @@ type WalletCore struct {
 	mod    api.Module
 	rt     wazero.Runtime
 	glob   Globals
-	mu     sync.Mutex
+	gate   chan struct{}
 	alive  bool
 	allocs map[uint32]uint32
 }
@@ -80,20 +79,34 @@ func Load(ctx context.Context) (*WalletCore, error) {
 		return nil, fmt.Errorf("walletcore: unexpected KEY_SIZE %d, want 32", glob.KeySize)
 	}
 
-	return &WalletCore{mod: mod, rt: rt, glob: glob, alive: true}, nil
+	w := &WalletCore{mod: mod, rt: rt, glob: glob, alive: true, gate: make(chan struct{}, 1)}
+	w.gate <- struct{}{}
+	return w, nil
 }
 
-// Close releases the WASM runtime. It blocks until any in-flight call finishes
-// and renders the instance unusable.
+// Close releases the WASM runtime after in-flight calls finish. Admission honors
+// ctx; if it expires while waiting, the caller must retry Close to release it.
 func (w *WalletCore) Close(ctx context.Context) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	if err := w.lock(ctx); err != nil {
+		return err
+	}
+	defer w.unlock()
 	if !w.alive {
 		return nil
 	}
 	w.alive = false
 	return w.rt.Close(ctx)
 }
+
+func (w *WalletCore) lock(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-w.gate:
+		return nil
+	}
+}
+func (w *WalletCore) unlock() { w.gate <- struct{}{} }
 
 // checkAlive returns an error if the instance has been closed.
 func (w *WalletCore) checkAlive() error {
@@ -111,14 +124,25 @@ func (w *WalletCore) Globals() Globals { return w.glob }
 // plus reading any outputs and freeing allocations) so a concurrent method
 // cannot reuse memory before this one reads it.
 func (w *WalletCore) runLocked(ctx context.Context, fn func(w *WalletCore) error) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := w.lock(ctx); err != nil {
+		return err
+	}
+	defer w.unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if err := w.checkAlive(); err != nil {
 		return err
 	}
 
-	return fn(w)
+	if err := fn(w); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 // invoke performs a single wallet-core export call and validates the returned
@@ -171,9 +195,11 @@ func readGlobals(mod api.Module) (Globals, error) {
 		return g.Get(), nil
 	}
 
-	heapBase, err := read("__heap_base")
-	if err != nil {
-		return Globals{}, err
+	// Current wallet-core intentionally does not export __heap_base. All host
+	// memory comes from malloc/free; no host heap-pointer assumptions are needed.
+	var heapBase uint64
+	if g := mod.ExportedGlobal("__heap_base"); g != nil {
+		heapBase = g.Get()
 	}
 
 	mem := mod.Memory()

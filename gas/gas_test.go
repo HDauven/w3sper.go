@@ -31,12 +31,11 @@ func TestExplicit(t *testing.T) {
 	}
 }
 
-func TestNonPositiveFallsBackToDefault(t *testing.T) {
-	g := New(big.NewInt(0), big.NewInt(-5))
-	if g.Limit.Cmp(big.NewInt(DefaultLimit)) != 0 {
-		t.Errorf("zero limit should default, got %s", g.Limit)
-	}
-	if g.Price.Cmp(big.NewInt(DefaultPrice)) != 0 {
-		t.Errorf("negative price should default, got %s", g.Price)
+func TestInvalidGasRejected(t *testing.T) {
+	max := new(big.Int).SetUint64(^uint64(0))
+	for _, values := range [][2]*big.Int{{big.NewInt(0), big.NewInt(1)}, {big.NewInt(1), big.NewInt(-5)}, {max, big.NewInt(2)}} {
+		if _, err := NewChecked(values[0], values[1]); err == nil {
+			t.Fatal("expected invalid gas error")
+		}
 	}
 }

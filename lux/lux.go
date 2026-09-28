@@ -29,7 +29,7 @@ func pow10Big(n int) *big.Int {
 // representation. Trailing zeros are omitted and a whole amount is returned
 // without a fractional part.
 func FormatToDusk(lux *big.Int) (string, error) {
-	if lux.Sign() < 0 {
+	if lux == nil || !lux.IsUint64() {
 		return "", fmt.Errorf("lux: cannot format negative value %s", lux)
 	}
 
@@ -78,6 +78,9 @@ func ParseFromDusk(dusk string) (*big.Int, error) {
 	result := new(big.Int).Mul(unitsBig, scaleFactor)
 	result.Add(result, fracBig)
 
+	if !result.IsUint64() {
+		return nil, fmt.Errorf("lux: value exceeds u64")
+	}
 	return result, nil
 }
 
@@ -105,6 +108,9 @@ func splitDecimal(s string) (units, frac string, ok bool) {
 		return s, "0", true
 	}
 
+	if dot == 0 || dot == len(s)-1 {
+		return "", "", false
+	}
 	return s[:dot], s[dot+1:], true
 }
 

@@ -1,8 +1,7 @@
 // Package network provides a client for interacting with a Dusk Rusk node.
 //
-// It implements the GraphQL-over-HTTP subset of the w3sper SDK's Network
-// client. The event-driven RUES (WebSocket) components are not implemented
-// here; the GraphQL query surface is the practical, testable core.
+// HTTP reads and streams honor context cancellation and a configurable default
+// deadline. RUES subscriptions use a real WebSocket session.
 package network
 
 import (
@@ -14,6 +13,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
+
+	"github.com/HDauven/w3sper.go/datadriver"
 )
 
 // DefaultVersion is the rusk-version header value sent with GraphQL requests.
@@ -44,15 +47,21 @@ func (e *GraphQLError) Error() string {
 
 // Request is a GraphQL request body.
 type Request struct {
-	Query     string                 `json:"query"`
-	Variables map[string]interface{} `json:"variables,omitempty"`
+	Query         string                 `json:"query"`
+	Variables     map[string]interface{} `json:"variables,omitempty"`
+	OperationName string                 `json:"operationName,omitempty"`
 }
 
 // Client is a GraphQL-over-HTTP client for a Rusk node.
 type Client struct {
-	baseURL *url.URL
-	version string
-	http    *http.Client
+	baseURL     *url.URL
+	version     string
+	http        *http.Client
+	timeout     time.Duration
+	mu          sync.Mutex
+	session     *ruesSession
+	connecting  *connectAttempt
+	DataDrivers *datadriver.Registry
 }
 
 // New returns a GraphQL client for the given node URL.
@@ -61,17 +70,22 @@ func New(nodeURL string, opts ...Option) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("network: invalid URL %q: %w", nodeURL, err)
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
+	if u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, fmt.Errorf("network: %q is not an http(s) URL", nodeURL)
 	}
 
 	c := &Client{
-		baseURL: u,
-		version: DefaultVersion,
-		http:    http.DefaultClient,
+		baseURL:     u,
+		version:     DefaultVersion,
+		http:        http.DefaultClient,
+		timeout:     120 * time.Second,
+		DataDrivers: datadriver.NewRegistry(),
 	}
 	for _, o := range opts {
 		o(c)
+	}
+	if c.timeout < 0 || c.http == nil {
+		return nil, fmt.Errorf("network: invalid timeout or HTTP client")
 	}
 	return c, nil
 }
@@ -100,6 +114,8 @@ func (c *Client) URL() *url.URL {
 
 // Query executes a GraphQL query and decodes the `data` object into out.
 func (c *Client) Query(ctx context.Context, gql string, opts ...QueryOption) (map[string]json.RawMessage, error) {
+	ctx, cancel := c.ReadContext(ctx)
+	defer cancel()
 	req, err := c.newQueryRequest(gql, opts...)
 	if err != nil {
 		return nil, err
@@ -116,6 +132,8 @@ func (c *Client) Query(ctx context.Context, gql string, opts ...QueryOption) (ma
 
 // QueryRaw executes a GraphQL query, returning the raw response bytes.
 func (c *Client) QueryRaw(ctx context.Context, gql string, opts ...QueryOption) ([]byte, error) {
+	ctx, cancel := c.ReadContext(ctx)
+	defer cancel()
 	req, err := c.newQueryRequest(gql, opts...)
 	if err != nil {
 		return nil, err
@@ -157,7 +175,8 @@ func (c *Client) newQueryRequest(gql string, opts ...QueryOption) (*http.Request
 	}
 
 	u, _ := url.Parse(c.baseURL.String())
-	u.Path = strings.TrimSuffix(u.Path, "/") + "/graphql"
+	u.Path = "/graphql"
+	u.RawPath, u.RawQuery = "", ""
 
 	req, err := http.NewRequest(http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
@@ -191,24 +210,30 @@ func parseResponse(resp *http.Response) (map[string]json.RawMessage, error) {
 
 	if len(bytes.TrimSpace(body)) > 0 {
 		if err := json.Unmarshal(body, &payload); err != nil {
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return nil, &HTTPError{resp.StatusCode, string(body), "/graphql"}
+			}
 			return nil, fmt.Errorf("network: invalid GraphQL response: %w", err)
 		}
 	}
 
 	if len(payload.Errors) > 0 {
-		return nil, &GraphQLError{Errors: payload.Errors}
+		return payload.Data, &GraphQLError{Errors: payload.Errors, Data: payload.Data}
 	}
 
 	if err := checkStatus(resp, body); err != nil {
 		return nil, err
 	}
 
+	if payload.Data == nil {
+		return nil, fmt.Errorf("network: invalid GraphQL response: missing data/errors")
+	}
 	return payload.Data, nil
 }
 
 func checkStatus(resp *http.Response, body []byte) error {
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("network: unexpected [%d] %s", resp.StatusCode, resp.Status)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &HTTPError{resp.StatusCode, string(body), "/graphql"}
 	}
 	if len(bytes.TrimSpace(body)) == 0 {
 		return fmt.Errorf("network: invalid GraphQL response: missing data/errors")

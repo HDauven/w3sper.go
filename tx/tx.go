@@ -1,12 +1,6 @@
-// Package tx implements the transaction builders of the w3sper SDK. The
-// builders orchestrate note selection, gas, and the [driver] to produce signed
-// (or provable) transactions.
-//
-// The cryptographic operations (key derivation, note picking, transaction
-// signing, ZK proving) are delegated to a [driver.Driver]. In the reference
-// JavaScript SDK this is the wallet-core WASM module; in Go it is a pluggable
-// interface. The pure orchestration logic (chain id, gas, nonce resolution,
-// stake validation) lives here.
+// Package tx builds public and shielded Dusk transactions using wallet-core.
+// Builders are mutable and not safe for concurrent mutation. BuildContext takes
+// an owned snapshot before any I/O. It does not reserve account nonces.
 package tx
 
 import (
@@ -15,209 +9,229 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/HDauven/w3sper.go/base58"
-	"github.com/HDauven/w3sper.go/chainid"
 	"github.com/HDauven/w3sper.go/driver"
-	"github.com/HDauven/w3sper.go/gas"
 	"github.com/HDauven/w3sper.go/network"
 	"github.com/HDauven/w3sper.go/profile"
 )
 
-// Canonical transfer contract id used on Dusk networks.
-const TRANSFER = "0100000000000000000000000000000000000000000000000000000000000000"
+const TRANSFER = network.TransferContract
+const STAKE = network.StakeContract
 
-// Canonical stake contract id used on Dusk networks.
-const STAKE = "0200000000000000000000000000000000000000000000000000000000000000"
-
-// ChainSource resolves the chain id for a transaction, either from an explicit
-// value or from the network's node info.
-type ChainSource interface {
-	ChainID() (int, error)
+type ChainSource interface{ ChainID() (int, error) }
+type ContextChainSource interface {
+	ChainIDContext(context.Context) (int, error)
 }
 
-// NetworkChainSource resolves the chain id from a Rusk node's info.
-func NetworkChainSource(c *network.Client) ChainSource {
-	return &networkChainSource{c: c}
-}
+func NetworkChainSource(c *network.Client) ChainSource { return &networkChainSource{c} }
 
-type networkChainSource struct {
-	c *network.Client
-}
+type networkChainSource struct{ c *network.Client }
 
-func (s *networkChainSource) ChainID() (int, error) {
-	info, err := network.NewNode(s.c).Info(context.Background())
-	if err != nil {
-		return 0, err
+func (s *networkChainSource) ChainID() (int, error) { return s.ChainIDContext(context.Background()) }
+func (s *networkChainSource) ChainIDContext(ctx context.Context) (int, error) {
+	info, e := network.NewNode(s.c).Info(ctx)
+	if e != nil {
+		return 0, e
 	}
 	return info.ChainID, nil
 }
 
-// Treasury abstracts the account/address balance and stake lookups used by the
-// builders. A concrete treasury is backed by a synced node.
+// Treasury is the legacy snapshot-provider interface. New I/O providers should
+// implement ContextTreasury so cancellation reaches their actual operations.
 type Treasury interface {
-	// AccountBalance returns the moonlight balance of an account key.
-	AccountBalance(account []byte) (AccountBalance, error)
-	// AddressNotes returns the owned notes of a phoenix address key.
-	AddressNotes(address []byte) ([]driver.Note, error)
-	// StakeInfo returns staking information for an account key.
-	StakeInfo(account []byte) (StakeInfo, error)
+	AccountBalance([]byte) (AccountBalance, error)
+	AddressNotes([]byte) ([]driver.Note, error)
+	StakeInfo([]byte) (StakeInfo, error)
+}
+type ContextTreasury interface {
+	AccountBalanceContext(context.Context, []byte) (AccountBalance, error)
+	AddressNotesContext(context.Context, []byte) ([]driver.Note, error)
+	StakeInfoContext(context.Context, []byte) (StakeInfo, error)
+}
+type StakeKeySource interface {
+	StakeKeysContext(context.Context, []byte) (*network.StakeKeys, error)
+}
+type AccountBalance = network.AccountBalance
+type StakeInfo = network.StakeInfo
+type StakeAmount = network.StakeAmount
+
+// CloneStakeInfo takes an owned snapshot of treasury-provided state.
+func CloneStakeInfo(in StakeInfo) StakeInfo {
+	out := in
+	out.Reward = copyInt(in.Reward)
+	if in.Amount != nil {
+		a := *in.Amount
+		a.Value = copyInt(a.Value)
+		a.Locked = copyInt(a.Locked)
+		a.Eligibility = copyInt(a.Eligibility)
+		a.Total = copyInt(a.Total)
+		out.Amount = &a
+	}
+	return out
 }
 
-// AccountBalance holds a moonlight account's nonce and value.
-type AccountBalance struct {
-	Nonce *big.Int
-	Value *big.Int
-}
-
-// StakeInfo holds staking details.
-type StakeInfo struct {
-	Amount     *StakeAmount // nil if no active stake
-	Reward     *big.Int
-	Faults     int
-	HardFaults int
-}
-
-// StakeAmount holds the staked amount details.
-type StakeAmount struct {
-	Value       *big.Int
-	Locked      *big.Int
-	Eligibility *big.Int
-	Total       *big.Int
-}
-
-// BookEntry binds a profile to a treasury and driver. It is the counterpart of
-// the JavaScript SDK's `BookEntry` (a profile-bound builder facade).
 type BookEntry struct {
 	profile  *profile.Profile
-	treasury Treasury
+	signer   *profile.Signer
+	treasury any
 	driver   driver.Driver
 }
 
-// NewBookEntry returns a book entry for the given profile.
-func NewBookEntry(p *profile.Profile, treasury Treasury, d driver.Driver) *BookEntry {
-	return &BookEntry{profile: p, treasury: treasury, driver: d}
-}
-
-// Profile returns the profile bound to this entry.
-func (e *BookEntry) Profile() *profile.Profile { return e.profile }
-
-// Treasury returns the treasury bound to this entry.
-func (e *BookEntry) Treasury() Treasury { return e.treasury }
-
-// Driver returns the driver bound to this entry.
-func (e *BookEntry) Driver() driver.Driver { return e.driver }
-
-// Builder carries the shared attributes of a transaction builder.
-type Builder struct {
-	entry *BookEntry
-	chain ChainSource
-	attrs attributes
-}
-
-type attributes struct {
-	amount   *big.Int
-	deposit  *big.Int
-	gas      *gas.Config
-	payload  interface{}
-	chain    *int
-	nonce    *big.Int
-	receiver []byte
-}
-
-// clone returns a deep copy of the attributes. Go's big.Int values are
-// mutable, unlike JavaScript BigInt, so amounts/deposits/nonces are always
-// copied to prevent caller mutation and cross-builder aliasing.
-func (a *attributes) clone() attributes {
-	c := attributes{
-		gas:      a.gas, // gas.Config is treated as immutable for a snapshot
-		payload:  a.payload,
-		receiver: append([]byte(nil), a.receiver...),
+// NewBookEntry accepts a public Profile (read-only) or a Signer. A generated
+// public profile is deliberately not signing authority.
+func NewBookEntry(identity any, treasury any, d driver.Driver) *BookEntry {
+	e := &BookEntry{treasury: treasury, driver: d}
+	switch v := identity.(type) {
+	case *profile.Profile:
+		e.profile = v
+	case *profile.Signer:
+		e.signer = v
+		e.profile = v.Profile()
 	}
-	if a.amount != nil {
-		c.amount = new(big.Int).Set(a.amount)
+	return e
+}
+func (e *BookEntry) Profile() *profile.Profile          { return e.profile }
+func (e *BookEntry) Signer() *profile.Signer            { return e.signer }
+func (e *BookEntry) Treasury() any                      { return e.treasury }
+func (e *BookEntry) Driver() driver.Driver              { return e.driver }
+func (e *BookEntry) Transfer(amount *big.Int) *Transfer { return NewTransfer(e).Amount(amount) }
+func (e *BookEntry) Deploy(bytecode []byte) *Builder    { return NewDeployment(e, bytecode) }
+func (e *BookEntry) Shield(amount *big.Int) *Builder {
+	return NewOperation(e, driver.Shield).Amount(amount)
+}
+func (e *BookEntry) Unshield(amount *big.Int) *Builder {
+	return NewOperation(e, driver.Unshield).Amount(amount)
+}
+func (e *BookEntry) Stake(amount *big.Int) *Builder {
+	return NewOperation(e, driver.Stake).Amount(amount)
+}
+func (e *BookEntry) Topup(amount *big.Int) *Builder { b := e.Stake(amount); b.topup = true; return b }
+func (e *BookEntry) Unstake(amount *big.Int) *Builder {
+	b := NewOperation(e, driver.Unstake)
+	if amount != nil {
+		b.Amount(amount)
 	}
-	if a.deposit != nil {
-		c.deposit = new(big.Int).Set(a.deposit)
-	}
-	if a.nonce != nil {
-		c.nonce = new(big.Int).Set(a.nonce)
-	}
-	if a.chain != nil {
-		v := *a.chain
-		c.chain = &v
-	}
-	return c
+	return b
+}
+func (e *BookEntry) Withdraw(amount *big.Int) *Builder {
+	return NewOperation(e, driver.WithdrawReward).Amount(amount)
 }
 
-func newBuilder(e *BookEntry) *Builder {
-	return &Builder{entry: e}
+func (e *BookEntry) AccountBalance(ctx context.Context, n *network.Client) (out AccountBalance, err error) {
+	if e == nil || e.profile == nil {
+		return out, fmt.Errorf("tx: public identity required")
+	}
+	if err = ctx.Err(); err != nil {
+		return
+	}
+	key := e.profile.Account().Bytes()
+	switch t := e.treasury.(type) {
+	case ContextTreasury:
+		out, err = t.AccountBalanceContext(ctx, key)
+	case Treasury:
+		out, err = t.AccountBalance(key)
+	default:
+		if n == nil {
+			return out, fmt.Errorf("tx: account treasury or network required")
+		}
+		d, ok := e.driver.(network.AccountCodec)
+		if !ok {
+			return out, driver.ErrDriverRequired
+		}
+		out, err = network.NewAccountSyncer(n, d).Balance(ctx, key)
+	}
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err == nil {
+		if out.Nonce == nil || out.Value == nil || !out.Nonce.IsUint64() || !out.Value.IsUint64() {
+			return AccountBalance{}, fmt.Errorf("tx: invalid account state")
+		}
+		out.Nonce = new(big.Int).Set(out.Nonce)
+		out.Value = new(big.Int).Set(out.Value)
+	}
+	return
 }
-
-// newBuilderSnapshot returns a Builder sharing the entry and chain source but
-// with an independent snapshot of the attributes. It is used when routing a
-// transfer so that two routes cannot mutate each other's state.
-func newBuilderSnapshot(e *BookEntry, chain ChainSource, attrs attributes) *Builder {
-	return &Builder{entry: e, chain: chain, attrs: attrs}
+func (e *BookEntry) Notes(ctx context.Context) (out []driver.Note, err error) {
+	if e == nil || e.profile == nil {
+		return nil, fmt.Errorf("tx: identity required")
+	}
+	if err = ctx.Err(); err != nil {
+		return
+	}
+	switch t := e.treasury.(type) {
+	case ContextTreasury:
+		out, err = t.AddressNotesContext(ctx, e.profile.Address().Bytes())
+	case Treasury:
+		out, err = t.AddressNotes(e.profile.Address().Bytes())
+	default:
+		return nil, fmt.Errorf("tx: note treasury required")
+	}
+	if err == nil {
+		err = ctx.Err()
+	}
+	return driver.CloneNotes(out), err
 }
-
-func (b *Builder) Entry() *BookEntry { return b.entry }
-
-func (b *Builder) requireDriver() (driver.Driver, error) {
-	if b.entry == nil || b.entry.driver == nil {
+func (e *BookEntry) StakeInfo(ctx context.Context, n *network.Client) (out StakeInfo, err error) {
+	defer func() {
+		if err == nil {
+			out = CloneStakeInfo(out)
+		}
+	}()
+	if e == nil || e.profile == nil {
+		return out, fmt.Errorf("tx: identity required")
+	}
+	if err = ctx.Err(); err != nil {
+		return
+	}
+	switch t := e.treasury.(type) {
+	case ContextTreasury:
+		out, err = t.StakeInfoContext(ctx, e.profile.Account().Bytes())
+	case Treasury:
+		out, err = t.StakeInfo(e.profile.Account().Bytes())
+	default:
+		if n == nil {
+			return out, fmt.Errorf("tx: stake treasury or network required")
+		}
+		d, ok := e.driver.(network.AccountCodec)
+		if !ok {
+			return out, driver.ErrDriverRequired
+		}
+		out, err = network.NewAccountSyncer(n, d).Stake(ctx, e.profile.Account().Bytes())
+	}
+	if err == nil {
+		err = ctx.Err()
+	}
+	return
+}
+func (e *BookEntry) StakeKeys(ctx context.Context, n *network.Client) (out *network.StakeKeys, err error) {
+	if e == nil || e.profile == nil {
+		return nil, fmt.Errorf("tx: identity required")
+	}
+	defer func() {
+		if err == nil {
+			err = ctx.Err()
+		}
+		if err != nil {
+			out = nil
+		} else if out != nil {
+			copy := *out
+			out = &copy
+		}
+	}()
+	if t, ok := e.treasury.(StakeKeySource); ok {
+		return t.StakeKeysContext(ctx, e.profile.Account().Bytes())
+	}
+	if n == nil {
+		return nil, fmt.Errorf("tx: stake owner lookup requires a provider")
+	}
+	d, ok := e.driver.(network.AccountCodec)
+	if !ok {
 		return nil, driver.ErrDriverRequired
 	}
-	return b.entry.driver, nil
-}
-
-func (b *Builder) requireChain() (int, error) {
-	if b.attrs.chain != nil {
-		return chainid.Validate(*b.attrs.chain)
-	}
-	if b.chain != nil {
-		return b.chain.ChainID()
-	}
-	return 0, fmt.Errorf("tx: chain id is required")
-}
-
-func (b *Builder) gas() *gas.Config {
-	if b.attrs.gas != nil {
-		return b.attrs.gas
-	}
-	return gas.New(nil, nil)
-}
-
-func (b *Builder) decodeReceiver(s string) ([]byte, error) {
-	bytes, err := base58.Decode(s)
+	keys, err := network.NewAccountSyncer(n, d).StakeKeys(ctx, [][]byte{e.profile.Account().Bytes()})
 	if err != nil {
-		return nil, fmt.Errorf("tx: invalid receiver: %w", err)
+		return nil, err
 	}
-	if len(bytes) == 0 {
-		return nil, fmt.Errorf("tx: invalid receiver identifier")
-	}
-	return bytes, nil
+	return keys[0], nil
 }
-
-func (b *Builder) profileIndex() profile.ProfileIndex {
-	if i := b.entry.profile.Index(); i >= 0 && i <= profile.MaxProfileIndex {
-		return profile.ProfileIndex(i)
-	}
-	return 0
-}
-
-// profileSeed returns the 64-byte seed used for key derivation. It requires a
-// real seed derived by a Generator; a profile parsed from public keys alone
-// cannot sign and must not silently use its public account key as seed material.
-func (b *Builder) profileSeed() ([]byte, error) {
-	if b.entry == nil || b.entry.profile == nil {
-		return nil, fmt.Errorf("tx: profile is required to sign")
-	}
-	if s := b.entry.profile.Seed(); len(s) > 0 {
-		return s, nil
-	}
-	return nil, fmt.Errorf("tx: profile has no seed and cannot sign; derive it from a Generator")
-}
-
-// IsDriverRequired reports whether err is a missing-driver error.
-func IsDriverRequired(err error) bool {
-	return errors.Is(err, driver.ErrDriverRequired)
-}
+func IsDriverRequired(err error) bool { return errors.Is(err, driver.ErrDriverRequired) }
