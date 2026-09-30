@@ -1,8 +1,8 @@
 # Pinned parity and evidence
 
 Reference: W3sper.js / Rusk `97f1cf26eeeb62d56e656871087ae2f02d960d72`.
-Previous Go base: `b1a5e225751d249a4651c4ac1ce9ab4696eaaf1f`.
-These changes are intentionally uncommitted pending coordinator review.
+Migration notes are in [README.md](../README.md#migrating-existing-callers);
+consumer-visible changes are listed in [CHANGELOG.md](../CHANGELOG.md).
 
 ## Implemented groups
 
@@ -32,7 +32,12 @@ acceptance, nullifiers, account/private deltas and actual execution are checked.
 The coordinator also independently compared all 12 assigned wallets across JS,
 Go and Python: identity, account/private balances, stake state/owners, unspent note
 and nullifier bytes, bookmarks and note root matched. That snapshot is separate
-from this worker's tests and does not imply the ports share ownership authority.
+from the SDK's own tests and does not imply the ports share ownership authority.
+
+History enrichment is associated by GraphQL alias rather than response-object
+order. This intentionally avoids the pinned JS history bug that can attach another
+transaction's fees, method and block metadata to a hash when aliases arrive out of
+order. The Go results were independently checked against node receipts by hash.
 
 ## Local live run
 

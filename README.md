@@ -53,6 +53,23 @@ GOPRIVATE=github.com/HDauven/w3sper.go GOTOOLCHAIN=go1.27.1 go run ./examples
 returns a 48-byte signature. It adds **no prefix, domain, prehash, origin binding,
 approval policy, or replay protection**. Define these in your application protocol.
 
+## Migrating existing callers
+
+See [CHANGELOG.md](CHANGELOG.md) for the unreleased API changes.
+
+- Replace signing through a generated `Profile` with `generator.Signer(ctx, public)`
+  and pass that signer to `tx.NewBookEntry` or `Bookkeeper.As`. Public profiles stay
+  usable for public reads; `Profile.Seed()` no longer provides signing material.
+- Dispose issued signers on wallet lock. Refusing later seed-provider requests
+  does not revoke them; close the wallet-core runtime separately.
+- Prefer context-aware builders/providers for network work. Synchronous callbacks
+  must cooperate with cancellation; the limits below still apply.
+- Upgrade the SDK and bundled wallet-core together. The current artifact does not
+  support the previous heap-base-dependent host ABI.
+- Revalidate gas and amount inputs: invalid explicit values now fail instead of
+  silently receiving defaults. Builders take the current account nonce and sign
+  the next nonce; applications still coordinate concurrent submissions.
+
 ## Network and wallet workflows
 
 Create `network.New(url, network.WithTimeout(120*time.Second))`. HTTP reads do not
