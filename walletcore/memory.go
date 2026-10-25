@@ -14,6 +14,12 @@ import (
 // alloc allocates n bytes in WASM memory, records their size, and returns the
 // pointer.
 func (w *WalletCore) alloc(ctx context.Context, n uint32) (uint32, error) {
+	if n == 0 {
+		n = 1
+	}
+	if n > 0x7fffffff {
+		return 0, fmt.Errorf("walletcore: allocation exceeds isize::MAX")
+	}
 	fn := w.mod.ExportedFunction("malloc")
 	if fn == nil {
 		return 0, fmt.Errorf("walletcore: malloc not exported")
@@ -23,6 +29,9 @@ func (w *WalletCore) alloc(ctx context.Context, n uint32) (uint32, error) {
 		return 0, fmt.Errorf("walletcore: malloc(%d): %w", n, err)
 	}
 	ptr := uint32(res[0])
+	if ptr == 0 {
+		return 0, fmt.Errorf("walletcore: allocation failed")
+	}
 	w.track(ptr, n)
 	return ptr, nil
 }
@@ -48,9 +57,17 @@ func (w *WalletCore) free(ctx context.Context, ptr uint32, outOfLineSize ...uint
 		delete(w.allocs, ptr)
 	}
 
+	if size == 0 || ptr == 0 {
+		return nil
+	}
+	delete(w.allocs, ptr)
+	// Best-effort erasure of all host-owned inputs, including seeds/keys.
+	if b, ok := w.mod.Memory().Read(ptr, size); ok {
+		clear(b)
+	}
 	fn := w.mod.ExportedFunction("free")
 	if fn == nil {
-		return nil
+		return fmt.Errorf("walletcore: free not exported")
 	}
 	if _, err := fn.Call(ctx, uint64(ptr), uint64(size)); err != nil {
 		return fmt.Errorf("walletcore: free(%d): %w", ptr, err)
@@ -86,11 +103,15 @@ func cloneBytes(in []byte) []byte {
 
 // box allocates n bytes and copies src into them, returning the pointer.
 func (w *WalletCore) box(ctx context.Context, src []byte) (uint32, error) {
+	if uint64(len(src)) > 0x7fffffff {
+		return 0, fmt.Errorf("walletcore: buffer too large")
+	}
 	ptr, err := w.alloc(ctx, uint32(len(src)))
 	if err != nil {
 		return 0, err
 	}
 	if err := w.writeBytes(ctx, ptr, src); err != nil {
+		_ = w.free(context.WithoutCancel(ctx), ptr)
 		return 0, err
 	}
 	return ptr, nil
@@ -126,6 +147,10 @@ func (w *WalletCore) takeAt(ctx context.Context, target uint32, includeLength bo
 		return nil, err
 	}
 
+	if length > 0x7ffffffb {
+		return nil, fmt.Errorf("walletcore: invalid output length")
+	}
+	defer w.free(context.WithoutCancel(ctx), target, 4+length)
 	// Read the payload first (owned copy).
 	var payload []byte
 	if includeLength {
@@ -134,16 +159,7 @@ func (w *WalletCore) takeAt(ctx context.Context, target uint32, includeLength bo
 		payload, err = w.readBytes(ctx, target+4, length)
 	}
 	if err != nil {
-		_ = w.free(ctx, target)
 		return nil, err
-	}
-
-	// Release the wallet-core-owned allocation out-of-line.
-	release := target
-	fn := w.mod.ExportedFunction("free")
-	if fn != nil {
-		// free(ptr, size) where size = 4 + length.
-		_, _ = fn.Call(ctx, uint64(release), uint64(4+length))
 	}
 
 	return payload, nil

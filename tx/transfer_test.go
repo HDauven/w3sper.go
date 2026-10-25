@@ -1,254 +1,143 @@
-package tx
+package tx_test
 
 import (
+	"bytes"
+	"context"
 	"math/big"
 	"testing"
 
 	"github.com/HDauven/w3sper.go/driver"
 	"github.com/HDauven/w3sper.go/profile"
+	"github.com/HDauven/w3sper.go/tx"
+	"github.com/HDauven/w3sper.go/walletcore"
 )
 
-// mockDriver implements the driver.Driver interface for the account flow.
-type mockDriver struct {
-	gotNonce  *big.Int
-	gotChain  int
-	called    bool
-	receivers [][]byte
+type snapshotTreasury struct{}
+
+func (snapshotTreasury) AccountBalance([]byte) (tx.AccountBalance, error) {
+	return tx.AccountBalance{Nonce: big.NewInt(7), Value: big.NewInt(100000000000000)}, nil
 }
-
-func (m *mockDriver) GenerateProfile(seed []byte, index profile.ProfileIndex) ([]byte, error) {
-	buf := make([]byte, profile.ProfileLen)
-	// Place the seed at the start and fill the remainder deterministically.
-	copy(buf, seed)
-	for i := 64; i < len(buf); i++ {
-		buf[i] = byte(i)
-	}
-	return buf, nil
+func (snapshotTreasury) AddressNotes([]byte) ([]driver.Note, error) { return nil, nil }
+func (snapshotTreasury) StakeInfo([]byte) (tx.StakeInfo, error) {
+	return tx.StakeInfo{Reward: big.NewInt(0)}, nil
 }
-
-func (m *mockDriver) Balance(seed []byte, index profile.ProfileIndex, notes []driver.Note) (*big.Int, *big.Int, error) {
-	return big.NewInt(0), big.NewInt(0), nil
-}
-
-func (m *mockDriver) PickNotes(seed []byte, index profile.ProfileIndex, notes []driver.Note, value *big.Int) ([]driver.Note, error) {
-	return nil, nil
-}
-
-func (m *mockDriver) Moonlight(in driver.MoonlightInput) ([]byte, string, error) {
-	m.called = true
-	m.gotNonce = in.Nonce
-	m.gotChain = in.ChainID
-	m.receivers = append(m.receivers, append([]byte(nil), in.Receiver...))
-	return []byte{0xde, 0xad}, "0x" + in.Nonce.String(), nil
-}
-
-func (m *mockDriver) Phoenix(in driver.PhoenixInput) ([]byte, []byte, error) {
-	return nil, nil, nil
-}
-
-func (m *mockDriver) IntoProven(tx, proof []byte) ([]byte, string, error) {
-	return nil, "", nil
-}
-
-func (m *mockDriver) MinimumStake() (*big.Int, error) {
-	return big.NewInt(1000000), nil
-}
-
-// mockTreasury returns a fixed balance.
-type mockTreasury struct{}
-
-func (mockTreasury) AccountBalance(account []byte) (AccountBalance, error) {
-	return AccountBalance{Nonce: big.NewInt(7), Value: big.NewInt(100)}, nil
-}
-
-func (mockTreasury) AddressNotes(address []byte) ([]driver.Note, error) {
-	return nil, nil
-}
-
-func (mockTreasury) StakeInfo(account []byte) (StakeInfo, error) {
-	return StakeInfo{}, nil
-}
-
-func TestAccountTransferBuild(t *testing.T) {
-	md := &mockDriver{}
-	entry := NewBookEntry(mustProfile(t), mockTreasury{}, md)
-
-	tr := NewTransfer(entry).
-		Amount(big.NewInt(5)).
-		Chain(0x2a)
-
-	routed, err := tr.To(receiverAccountKey(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if routed.Account == nil {
-		t.Fatal("expected account transfer")
-	}
-
-	res, err := routed.Account.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !md.called {
-		t.Fatal("driver.Moonlight not called")
-	}
-	// nonce should be 7 + 1 = 8
-	if md.gotNonce.Cmp(big.NewInt(8)) != 0 {
-		t.Errorf("nonce = %s, want 8", md.gotNonce)
-	}
-	if md.gotChain != 0x2a {
-		t.Errorf("chain = %x, want 2a", md.gotChain)
-	}
-	if res.ChainID != 0x2a {
-		t.Errorf("result chain = %d, want 42", res.ChainID)
-	}
-}
-
-// TestRoutedTransferIndependence checks that routing one base transfer to two
-// different accounts keeps each build on its own receiver despite shared state.
-func TestRoutedTransferIndependence(t *testing.T) {
-	md := &mockDriver{}
-	entry := NewBookEntry(mustProfile(t), mockTreasury{}, md)
-
-	base := NewTransfer(entry).Amount(big.NewInt(5)).Chain(0x2a)
-
-	first, err := base.To(receiverAccountKey(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := base.To(secondReceiverAccountKey(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := first.Account.Build(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := second.Account.Build(); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(md.receivers) != 2 {
-		t.Fatalf("expected 2 builds, got %d", len(md.receivers))
-	}
-	firstKey := decodeAccountKey(t, receiverAccountKey(t))
-	secondKey := decodeAccountKey(t, secondReceiverAccountKey(t))
-	if !bytesEqual(md.receivers[0], firstKey) {
-		t.Fatal("first route signed to the wrong receiver")
-	}
-	if !bytesEqual(md.receivers[1], secondKey) {
-		t.Fatal("second route signed to the wrong receiver")
-	}
-}
-
-func secondReceiverAccountKey(t *testing.T) string {
+func setup(t *testing.T) (*walletcore.WalletCore, *profile.Generator, *profile.Signer) {
 	t.Helper()
-	buf := make([]byte, profile.AccountKeyLen)
-	for i := range buf {
-		buf[i] = byte(0x40 | (i % 32))
+	ctx := context.Background()
+	w, e := walletcore.Load(ctx)
+	if e != nil {
+		t.Fatal(e)
 	}
-	return profile.EncodeAccount(buf)
-}
-
-func decodeAccountKey(t *testing.T, s string) []byte {
-	t.Helper()
-	b, err := profile.DecodeKey(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func TestAccountTransferRequiresDriver(t *testing.T) {
-	entry := NewBookEntry(mustProfile(t), mockTreasury{}, nil)
-	tr := NewTransfer(entry).Amount(big.NewInt(1)).Chain(1)
-	routed, err := tr.To(receiverAccountKey(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = routed.Account.Build()
-	if err == nil {
-		t.Fatal("expected error with nil driver")
-	}
-	if !IsDriverRequired(err) {
-		t.Errorf("expected driver-required error, got: %v", err)
-	}
-}
-
-func TestTransferToRejectsInvalid(t *testing.T) {
-	entry := NewBookEntry(mustProfile(t), mockTreasury{}, nil)
-	tr := NewTransfer(entry).Amount(big.NewInt(1))
-	if _, err := tr.To("not-a-key"); err == nil {
-		t.Fatal("expected error for invalid identifier")
-	}
-}
-
-func mustProfile(t *testing.T) *profile.Profile {
-	t.Helper()
-	md := &mockDriver{}
+	t.Cleanup(func() { w.Close(ctx) })
 	seed := make([]byte, 64)
 	for i := range seed {
-		seed[i] = byte(i*3 + 1)
+		seed[i] = byte(i)
 	}
-	gen := profile.NewGenerator(func() ([]byte, error) { return seed, nil }, md)
-	p, err := gen.Default()
-	if err != nil {
-		t.Fatal(err)
+	g := profile.NewGenerator(func() ([]byte, error) { return seed, nil }, w)
+	s, e := g.DefaultSigner(ctx)
+	if e != nil {
+		t.Fatal(e)
 	}
-	return p
+	t.Cleanup(s.Dispose)
+	return w, g, s
 }
-
-// TestAccountTransferRequiresSeed verifies that a profile parsed from public
-// keys alone (no seed) cannot silently become a signer using its own public
-// account key as seed material.
-func TestAccountTransferRequiresSeed(t *testing.T) {
-	md := &mockDriver{}
-	entry := NewBookEntry(seedlessProfile(t), mockTreasury{}, md)
-	tr := NewTransfer(entry).Amount(big.NewInt(1)).Chain(1)
-	routed, err := tr.To(receiverAccountKey(t))
-	if err != nil {
-		t.Fatal(err)
+func TestAccountTransferBuild(t *testing.T) {
+	w, g, s := setup(t)
+	receiver, e := g.Next()
+	if e != nil {
+		t.Fatal(e)
 	}
-	_, err = routed.Account.Build()
-	if err == nil {
-		t.Fatal("expected error signing with a seedless profile")
+	entry := tx.NewBookEntry(s, snapshotTreasury{}, w)
+	route, e := entry.Transfer(big.NewInt(5)).Chain(42).To(receiver.Account().String())
+	if e != nil {
+		t.Fatal(e)
 	}
-	if md.called {
-		t.Fatal("driver.Moonlight was called for a seedless profile")
+	r, e := route.Account.BuildContext(context.Background(), nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if r.Nonce.Uint64() != 8 || r.ChainID != 42 || len(r.Hash) != 64 || len(r.Buffer) == 0 {
+		t.Fatalf("bad result: %+v", r)
 	}
 }
-
-// seedlessProfile builds a profile parsed purely from public bytes.
-func seedlessProfile(t *testing.T) *profile.Profile {
-	t.Helper()
-	buf := make([]byte, profile.ProfileLen)
-	for i := range buf {
-		buf[i] = byte(i)
+func TestRoutedTransferIndependence(t *testing.T) {
+	w, g, s := setup(t)
+	a, _ := g.Derive(1)
+	b, _ := g.Derive(2)
+	amount := big.NewInt(5)
+	entry := tx.NewBookEntry(s, snapshotTreasury{}, w)
+	base := entry.Transfer(amount).Chain(42)
+	first, _ := base.To(a.Account().String())
+	second, _ := base.To(b.Account().String())
+	amount.SetInt64(99)
+	base.Amount(big.NewInt(200))
+	one, e := first.Account.Build()
+	if e != nil {
+		t.Fatal(e)
 	}
-	p, err := profile.Parse(buf)
-	if err != nil {
-		t.Fatal(err)
+	two, e := second.Account.Build()
+	if e != nil {
+		t.Fatal(e)
 	}
-	return p
+	if one.Hash == two.Hash || !bytes.Contains(one.Buffer, a.Account().Bytes()) || !bytes.Contains(two.Buffer, b.Account().Bytes()) {
+		t.Fatal("routes alias")
+	}
 }
-
-func receiverAccountKey(t *testing.T) string {
-	t.Helper()
-	buf := make([]byte, profile.AccountKeyLen)
-	for i := range buf {
-		buf[i] = byte(0xff - i)
+func TestPublicProfileCannotSign(t *testing.T) {
+	w, g, _ := setup(t)
+	p, _ := g.Default()
+	route, _ := tx.NewTransfer(tx.NewBookEntry(p, snapshotTreasury{}, w)).Chain(42).Amount(big.NewInt(1)).To(p.Account().String())
+	if _, e := route.Account.Build(); e == nil {
+		t.Fatal("public profile signed")
 	}
-	return profile.EncodeAccount(buf)
+}
+func TestAccountTransferRequiresDriver(t *testing.T) {
+	_, _, s := setup(t)
+	route, _ := tx.NewTransfer(tx.NewBookEntry(s, snapshotTreasury{}, nil)).Chain(42).To(s.Account().String())
+	if _, e := route.Account.Build(); !tx.IsDriverRequired(e) {
+		t.Fatalf("wrong error %v", e)
+	}
+}
+func TestTransferValidation(t *testing.T) {
+	w, _, s := setup(t)
+	entry := tx.NewBookEntry(s, snapshotTreasury{}, w)
+	if _, e := entry.Transfer(big.NewInt(1)).To("not-a-key"); e == nil {
+		t.Fatal("invalid receiver accepted")
+	}
+	for _, b := range []*tx.Builder{entry.Transfer(big.NewInt(-1)).Chain(42), entry.Transfer(nil).Chain(42), entry.Transfer(big.NewInt(1)).Chain(256), entry.Transfer(big.NewInt(1)).Chain(42).Gas(tx.Gas(big.NewInt(0), nil)), entry.Transfer(big.NewInt(1)).Chain(42).Nonce(new(big.Int).SetUint64(^uint64(0)))} {
+		route, _ := b.To(s.Account().String())
+		if _, e := route.Account.Build(); e == nil {
+			t.Fatal("invalid transfer accepted")
+		}
+	}
+}
+func TestCommittedRestrictions(t *testing.T) {
+	w, g, s := setup(t)
+	other, _ := g.Derive(1)
+	entry := tx.NewBookEntry(s, snapshotTreasury{}, w)
+	id := make([]byte, 32)
+	id[0] = 1
+	for _, b := range []*tx.Builder{entry.Transfer(big.NewInt(1)).ContractCall(driver.Call{ContractID: id, Function: "noop"}).Committed(), entry.Transfer(big.NewInt(0)).Memo([]byte("memo")).Committed(), entry.Transfer(big.NewInt(0)).Deposit(big.NewInt(1)).ContractCall(driver.Call{ContractID: id, Function: "noop"}).Committed()} {
+		route, _ := b.Chain(42).To(s.Account().String())
+		if _, e := route.Account.Build(); e == nil {
+			t.Fatal("invalid committed call accepted")
+		}
+	}
+	route, _ := entry.Transfer(big.NewInt(0)).Chain(42).ContractCall(driver.Call{ContractID: id, Function: "noop"}).Committed().To(other.Account().String())
+	if _, e := route.Account.Build(); e == nil {
+		t.Fatal("committed foreign envelope accepted")
+	}
+}
+func TestDisposedSignerAndCanceledBuild(t *testing.T) {
+	w, _, s := setup(t)
+	route, _ := tx.NewBookEntry(s, snapshotTreasury{}, w).Transfer(big.NewInt(1)).Chain(42).To(s.Account().String())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, e := route.Account.BuildContext(ctx, nil); e == nil {
+		t.Fatal("canceled build succeeded")
+	}
+	s.Dispose()
+	if _, e := route.Account.Build(); e == nil {
+		t.Fatal("disposed signer signed")
+	}
 }

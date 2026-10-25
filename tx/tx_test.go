@@ -11,10 +11,10 @@ import (
 
 func TestNetworkChainSource(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/graphql" {
+		if r.Method != http.MethodPost || r.URL.Path != "/on/node/info" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		fmt.Fprint(w, `{"data":{"chain":{"header":{"chainId":42}}}}`)
+		fmt.Fprint(w, `{"chain_id":42,"version":"1.7.1"}`)
 	}))
 	defer server.Close()
 

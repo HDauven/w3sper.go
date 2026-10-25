@@ -1,45 +1,49 @@
-// Package gas provides a gas configuration for transactions, mirroring the
-// w3sper JavaScript SDK's `Gas` class.
+// Package gas validates positive u64 transaction gas and total fees.
 package gas
 
-import "math/big"
+import (
+	"fmt"
+	"math/big"
+)
 
 const (
-	// DefaultLimit is used when a non-positive limit is provided.
 	DefaultLimit = 2_900_000_000
-	// DefaultPrice is used when a non-positive price is provided.
 	DefaultPrice = 1
 )
 
-// Config holds the gas limit and price of a transaction. The total is derived
-// as limit * price.
-type Config struct {
-	Limit *big.Int
-	Price *big.Int
-	Total *big.Int
-}
+type Config struct{ Limit, Price, Total *big.Int }
 
-// New returns a gas configuration. A nil or non-positive limit selects the
-// [DefaultLimit] and likewise a nil or non-positive price selects the
-// [DefaultPrice].
+// New defaults only omitted values. Invalid values are retained and rejected by
+// Validate and all signing boundaries. Use NewChecked for immediate validation.
 func New(limit, price *big.Int) *Config {
-	l := maxPositive(limit)
-	if l == nil {
-		l = big.NewInt(DefaultLimit)
+	if limit == nil {
+		limit = big.NewInt(DefaultLimit)
 	}
-	p := maxPositive(price)
-	if p == nil {
-		p = big.NewInt(DefaultPrice)
+	if price == nil {
+		price = big.NewInt(DefaultPrice)
 	}
-
-	total := new(big.Int).Mul(l, p)
-
-	return &Config{Limit: l, Price: p, Total: total}
+	l, p := new(big.Int).Set(limit), new(big.Int).Set(price)
+	return &Config{Limit: l, Price: p, Total: new(big.Int).Mul(l, p)}
 }
-
-func maxPositive(v *big.Int) *big.Int {
-	if v == nil || v.Sign() <= 0 {
-		return nil
+func NewChecked(limit, price *big.Int) (*Config, error) {
+	c := New(limit, price)
+	if err := c.Validate(); err != nil {
+		return nil, err
 	}
-	return new(big.Int).Set(v)
+	return c, nil
+}
+func (c *Config) Validate() error {
+	if c == nil || c.Limit == nil || c.Price == nil || c.Limit.Sign() <= 0 || c.Price.Sign() <= 0 || !c.Limit.IsUint64() || !c.Price.IsUint64() {
+		return fmt.Errorf("gas: limit and price must be positive u64 integers")
+	}
+	if !new(big.Int).Mul(c.Limit, c.Price).IsUint64() {
+		return fmt.Errorf("gas: total fee exceeds u64")
+	}
+	return nil
+}
+func (c *Config) Clone() *Config {
+	if c == nil {
+		return New(nil, nil)
+	}
+	return New(c.Limit, c.Price)
 }

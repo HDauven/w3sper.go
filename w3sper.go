@@ -1,21 +1,20 @@
-// Package w3sper is a Go port of the Dusk Network w3sper SDK. It provides the
-// pure, deterministic layers of the SDK — Lux/Dusk conversion, gas, chain id
-// validation, Base16/Base58 encoding, bookmarks, profiles, a GraphQL network
-// client, and transaction builders — plus a pluggable [driver.Driver] that
-// defines the cryptographic protocol boundary (key derivation, note picking,
-// transaction signing, ZK proving).
-//
-// In the reference JavaScript SDK the cryptographic operations are performed
-// by the wallet-core WASM module. This Go port keeps that boundary behind the
-// driver interface so the rest of the library can be exercised end-to-end with
-// a concrete driver.
+// Package w3sper exposes a Go SDK for Dusk, pinned to W3sper.js 97f1cf26.
+// It supports Moonlight/Phoenix transactions, staking, deployment, committed
+// calls, RUES events, synchronization and contract data drivers. Cryptography
+// runs in the bundled wallet-core WASM using wazero; Phoenix proofs come from
+// the node prover. Public Profiles cannot sign: explicitly issue and dispose a
+// profile.Signer. See the subpackages for the context-aware APIs and README.md
+// for ownership, cancellation and acceptance-test limits.
 package w3sper
 
 import (
 	"github.com/HDauven/w3sper.go/base16"
 	"github.com/HDauven/w3sper.go/base58"
+	"github.com/HDauven/w3sper.go/bookkeeper"
 	"github.com/HDauven/w3sper.go/bookmark"
 	"github.com/HDauven/w3sper.go/chainid"
+	"github.com/HDauven/w3sper.go/contract"
+	"github.com/HDauven/w3sper.go/datadriver"
 	"github.com/HDauven/w3sper.go/driver"
 	"github.com/HDauven/w3sper.go/gas"
 	"github.com/HDauven/w3sper.go/lux"
@@ -60,7 +59,14 @@ var (
 // Re-exported types.
 type (
 	// Driver is the cryptographic protocol boundary.
-	Driver = driver.Driver
+	Driver             = driver.Driver
+	Protocol           = driver.Protocol
+	Signer             = profile.Signer
+	ProfileGenerator   = profile.Generator
+	Contract           = contract.Contract
+	DataDriverRegistry = datadriver.Registry
+	Bookkeeper         = bookkeeper.Bookkeeper
+	TransactionResult  = tx.Result
 	// DriverRequiredError indicates a missing protocol driver.
 	DriverRequiredError = driver.DriverRequiredError
 	// Gas is a gas configuration.
@@ -69,7 +75,7 @@ type (
 	Bookmark = bookmark.Bookmark
 	// Profile is an address/account keypair.
 	Profile = profile.Profile
-	// NetworkClient is a GraphQL-over-HTTP Rusk client.
+	// NetworkClient is a Rusk HTTP/GraphQL/RUES client.
 	NetworkClient = network.Client
 	// BookEntry is a profile-bound transaction facade.
 	BookEntry = tx.BookEntry
@@ -100,7 +106,7 @@ var (
 // NewGas returns a gas configuration.
 func NewGas(limit, price *big.Int) *gas.Config { return gas.New(limit, price) }
 
-// NewNetwork returns a GraphQL network client for a Rusk node URL.
+// NewNetwork returns an HTTP/GraphQL/RUES client for a Rusk node URL.
 func NewNetwork(url string, opts ...network.Option) (*network.Client, error) {
 	return network.New(url, opts...)
 }

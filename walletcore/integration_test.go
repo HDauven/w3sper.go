@@ -1,6 +1,7 @@
 package walletcore
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -48,7 +49,12 @@ func TestEndToEndMoonlightTransfer(t *testing.T) {
 	receiver := receiverProf.Account().String() // base58 account key
 
 	treasury := &integrationTreasury{nonce: big.NewInt(5), value: big.NewInt(1_000_000_000_000)}
-	entry := tx.NewBookEntry(sender, treasury, w)
+	signer, err := gen.Signer(context.Background(), sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer signer.Dispose()
+	entry := tx.NewBookEntry(signer, treasury, w)
 
 	tr := tx.NewTransfer(entry).
 		Amount(big.NewInt(1000000000)).

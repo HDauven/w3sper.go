@@ -33,6 +33,9 @@ func New(data []byte) (*Bookmark, error) {
 func From(source any) (*Bookmark, error) {
 	switch v := source.(type) {
 	case *Bookmark:
+		if v == nil {
+			return nil, fmt.Errorf("bookmark: nil cursor")
+		}
 		return v.clone(), nil
 	case *big.Int:
 		return fromUint(v)
@@ -52,6 +55,9 @@ func From(source any) (*Bookmark, error) {
 }
 
 func fromUint(v *big.Int) (*Bookmark, error) {
+	if v == nil || !v.IsUint64() {
+		return nil, fmt.Errorf("bookmark: cursor must be an unsigned 64-bit integer")
+	}
 	var buf [Size]byte
 	binary.LittleEndian.PutUint64(buf[:], v.Uint64())
 	return New(buf[:])

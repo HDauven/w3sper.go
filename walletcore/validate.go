@@ -5,6 +5,7 @@ import (
 	"math/big"
 
 	"github.com/HDauven/w3sper.go/driver"
+	"github.com/HDauven/w3sper.go/gas"
 )
 
 // Boundary constants. Receiver/sender sizes come from wallet-core.
@@ -87,6 +88,9 @@ func (w *WalletCore) validateMoonlight(in driver.MoonlightInput, requireReceiver
 		return err
 	}
 	if _, err := u64OrErr("gas price", in.GasPrice); err != nil {
+		return err
+	}
+	if err := gas.New(in.GasLimit, in.GasPrice).Validate(); err != nil {
 		return err
 	}
 	if _, err := u64OrErr("nonce", in.Nonce); err != nil {
